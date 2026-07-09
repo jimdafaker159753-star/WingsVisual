@@ -4,8 +4,7 @@
 #include <cstring>
 #include <cmath>
 
-// Включи в 1 для дампа флагов игроков в OutputDebugString (DebugView). Файла на диске нет.
-#define ESP_DEBUG_FLAGS 0
+#define ESP_DEBUG_FLAGS 1
 
 // ================= WoW 3.3.5a (build 12340) =================
 namespace Off {
@@ -19,7 +18,6 @@ namespace Off {
     constexpr uintptr_t OBJ_GUID = 0x30;
     constexpr uintptr_t OBJ_DESCRIPTORS = 0x08;
 
-    // X @ 0x798, Y @ 0x79C, Z @ 0x7A0 — своп зашит здесь, в ESP правится не нужно
     constexpr uintptr_t POS_X = 0x798;
     constexpr uintptr_t POS_Y = 0x79C;
     constexpr uintptr_t POS_Z = 0x7A0;
@@ -29,8 +27,10 @@ namespace Off {
     constexpr uint32_t UNIT_FIELD_HEALTH = 0x18;
     constexpr uint32_t UNIT_FIELD_MAXHEALTH = 0x20;
     constexpr uint32_t UNIT_FIELD_LEVEL = 0x36;
+    constexpr uint32_t UNIT_FIELD_FACTIONTEMPLATE = 0x37;
     constexpr uint32_t UNIT_FIELD_FLAGS = 0x3B;
     constexpr uint32_t UNIT_DYNAMIC_FLAGS = 0x4F;
+    constexpr uint32_t UNIT_FIELD_BYTES_0 = 0x5C;
 
     constexpr uintptr_t NAME_STORE = 0x00C5D938 + 0x8;
     constexpr uintptr_t NAME_MASK_OFFSET = 0x24;
@@ -52,25 +52,39 @@ enum WowObjectType : uint8_t {
     OT_PLAYER = 4, OT_GAMEOBJECT = 5, OT_DYNOBJECT = 6, OT_CORPSE = 7
 };
 
+enum Reaction : uint8_t { REACT_NEUTRAL = 0, REACT_FRIENDLY = 1, REACT_HOSTILE = 2 };
+
 struct PlayerInfo {
     uint64_t guid;
-    char     name[48];
-    float    x, y, z;
-    int32_t  health;
-    int32_t  maxHealth;
+    char name[48];
+    float x, y, z;
+    int32_t health;
+    int32_t maxHealth;
     uint32_t unitFlags;
     uint32_t dynFlags;
-    uint8_t  type;
+    uint32_t factionTemplate;
+    uint8_t race;
+    uint8_t type;
 };
 
 constexpr int MAX_PLAYERS = 512;
 inline PlayerInfo g_players[MAX_PLAYERS];
-inline int        g_playerCount = 0;
+inline int g_playerCount = 0;
 
 inline float g_localX = 0.0f, g_localY = 0.0f, g_localZ = 0.0f;
-inline bool  g_localValid = false;
+inline bool g_localValid = false;
+inline uint8_t g_localRace = 0;
+inline int g_localGroup = 0; // 0=неизв, 1=Alliance, 2=Horde
 
-template<typename T>
+static inline int RaceGroup(uint8_t race) {
+    switch (race) {
+    case 1: case 3: case 4: case 7: case 11: return 1;
+    case 2: case 5: case 6: case 8: case 10: return 2;
+    default: return 0;
+    }
+}
+
+template <typename T>
 static inline bool SafeRead(uintptr_t addr, T& out) {
     if (addr < 0x10000) return false;
     __try { out = *reinterpret_cast<T*>(addr); return true; }
@@ -92,13 +106,6 @@ static inline bool IsValidEntity(uintptr_t base) {
     uint64_t guid = 0;
     if (!SafeRead(base + Off::OBJ_GUID, guid) || guid == 0) return false;
     return true;
-}
-
-static inline bool IsActivePlayer(uintptr_t base) {
-    uint8_t type = 0; uint64_t guid = 0;
-    if (!SafeRead(base + Off::OBJ_TYPE, type)) return false;
-    if (!SafeRead(base + Off::OBJ_GUID, guid)) return false;
-    return (type == OT_PLAYER && guid != 0);
 }
 
 static inline bool CoordsSane(float x, float y, float z) {
@@ -148,6 +155,23 @@ static const char* GetUnitName(uintptr_t obj) {
     __except (EXCEPTION_EXECUTE_HANDLER) { return ""; }
 }
 
+// реакция по памяти: враг=красный, союзник=зелёный, нейтрал=белый
+static inline Reaction GetReaction(const PlayerInfo& p) {
+    if (p.type == OT_PLAYER) {
+        int g = RaceGroup(p.race);
+        if (g == 0 || g_localGroup == 0) return REACT_NEUTRAL;
+        return (g == g_localGroup) ? REACT_FRIENDLY : REACT_HOSTILE;
+    }
+    if (p.unitFlags & UNIT_FLAG_NON_ATTACKABLE) return REACT_FRIENDLY;
+    switch (p.factionTemplate) {
+    case 7: case 14: case 16: case 21: case 83: case 84:
+    case 128: case 129: case 168: case 733: case 1888: case 1890:
+        return REACT_HOSTILE;
+    default:
+        return REACT_NEUTRAL;
+    }
+}
+
 static bool FillEntity(uintptr_t obj, uint8_t type, PlayerInfo& pi) {
     uint64_t guid = 0;
     if (!SafeRead(obj + Off::OBJ_GUID, guid) || !guid) return false;
@@ -164,14 +188,18 @@ static bool FillEntity(uintptr_t obj, uint8_t type, PlayerInfo& pi) {
         SafeRead(desc + Off::UNIT_FIELD_MAXHEALTH * 4, maxHp);
     }
 
-    uint32_t uflags = 0, dflags = 0;
+    uint32_t uflags = 0, dflags = 0, faction = 0, bytes0 = 0;
     ReadUnitField(obj, Off::UNIT_FIELD_FLAGS, uflags);
     ReadUnitField(obj, Off::UNIT_DYNAMIC_FLAGS, dflags);
+    ReadUnitField(obj, Off::UNIT_FIELD_FACTIONTEMPLATE, faction);
+    ReadUnitField(obj, Off::UNIT_FIELD_BYTES_0, bytes0);
 
     pi.guid = guid;
     pi.x = x; pi.y = y; pi.z = z;
     pi.health = hp; pi.maxHealth = maxHp;
     pi.unitFlags = uflags; pi.dynFlags = dflags;
+    pi.factionTemplate = faction;
+    pi.race = (uint8_t)(bytes0 & 0xFF);
     pi.type = type;
 
     const char* nm = (type == OT_PLAYER) ? GetPlayerName(guid) : GetUnitName(obj);
@@ -180,22 +208,6 @@ static bool FillEntity(uintptr_t obj, uint8_t type, PlayerInfo& pi) {
         _TRUNCATE);
     return true;
 }
-
-#if ESP_DEBUG_FLAGS
-static void DebugDumpUnit(uintptr_t obj) {
-    uint64_t guid = 0; SafeRead(obj + Off::OBJ_GUID, guid);
-    uint32_t uf = 0, df = 0;
-    ReadUnitField(obj, Off::UNIT_FIELD_FLAGS, uf);
-    ReadUnitField(obj, Off::UNIT_DYNAMIC_FLAGS, df);
-    float x = 0, y = 0, z = 0;
-    SafeRead(obj + Off::POS_X, x); SafeRead(obj + Off::POS_Y, y); SafeRead(obj + Off::POS_Z, z);
-    char buf[256];
-    _snprintf_s(buf, _TRUNCATE,
-        "[ESP] guid=%08X FLAGS=0x%08X DYN=0x%08X pos=(%.1f,%.1f,%.1f)\n",
-        (uint32_t)guid, uf, df, x, y, z);
-    OutputDebugStringA(buf);
-}
-#endif
 
 inline int RefreshEntities(bool includeUnits, bool includePlayers, bool includeSelf) {
     g_playerCount = 0;
@@ -226,11 +238,13 @@ inline int RefreshEntities(bool includeUnits, bool includePlayers, bool includeS
                     SafeRead(obj + Off::POS_Y, ly);
                     SafeRead(obj + Off::POS_Z, lz);
                     g_localX = lx; g_localY = ly; g_localZ = lz; g_localValid = true;
+
+                    uint32_t lb0 = 0;
+                    ReadUnitField(obj, Off::UNIT_FIELD_BYTES_0, lb0);
+                    g_localRace = (uint8_t)(lb0 & 0xFF);
+                    g_localGroup = RaceGroup(g_localRace);
                 }
 
-#if ESP_DEBUG_FLAGS
-                if (isPlayer && !isSelf) DebugDumpUnit(obj);
-#endif
                 bool take = (isPlayer && includePlayers) || (isUnit && includeUnits);
                 if (take && (includeSelf || !isSelf)) {
                     if (FillEntity(obj, type, g_players[g_playerCount]))

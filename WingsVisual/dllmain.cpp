@@ -3,33 +3,34 @@
 #include <math.h>
 #include <commctrl.h>
 #include "MinHook.h"
+#include "EspSettings.h"
 #pragma comment(lib, "comctl32.lib")
 
-// ==== ESP module (ESP.cpp) ====
 extern DWORD WINAPI EspInitThread(LPVOID);
-extern void        EspShutdown();
+extern void EspShutdown();
 
-// ============ WoW 3.3.5a (build 12340) ============
 typedef int(__cdecl* ExecBuf_t)(const char*, const char*, int);
 ExecBuf_t ExecuteBuffer = (ExecBuf_t)0x00819210;
 
-#define CAM_LIMIT_ADDR     0x00A1E2FC
-#define CAM_MGR_PTR        0x00B7436C
-#define CAM_OBJ_OFFSET     0x7E20
-#define CAM_DIST_OFFSET    0x118
-#define CAM_STATE_OFFSET   0x1E8
-#define CAM_VEL_OFFSET     0x1EC
-#define CLAMP_JE_ADDR      0x00600133
-#define CAM_UPDATE_ADDR    0x00606F90
+#define CAM_LIMIT_ADDR   0x00A1E2FC
+#define CAM_MGR_PTR      0x00B7436C
+#define CAM_OBJ_OFFSET   0x7E20
+#define CAM_DIST_OFFSET  0x118
+#define CAM_STATE_OFFSET 0x1E8
+#define CAM_VEL_OFFSET   0x1EC
+#define CAM_FOV_OFFSET   0x40
+#define CLAMP_JE_ADDR    0x00600133
+#define CAM_UPDATE_ADDR  0x00606F90
 
-#define WM_TOGGLEMENU      (WM_APP+1)
-#define WM_REFRESHLBL      (WM_APP+2)
-#define WM_SETDIST         (WM_APP+3)
+#define WM_TOGGLEMENU (WM_APP+1)
+#define WM_REFRESHLBL (WM_APP+2)
+#define WM_SETDIST    (WM_APP+3)
 
-#define WHEEL_STEP         40.0f
-#define SMOOTH_SPEED       10.0f
-#define DIST_MIN           15.0f
-#define DIST_MAX            1000.0f
+#define WHEEL_STEP   40.0f
+#define SMOOTH_SPEED 10.0f
+#define DIST_MIN     15.0f
+#define DIST_MAX     1000.0f
+#define DEG2RAD      0.01745329f
 
 #define CLR_BG     RGB(18,16,12)
 #define CLR_BOX    RGB(30,26,20)
@@ -41,24 +42,35 @@ ExecBuf_t ExecuteBuffer = (ExecBuf_t)0x00819210;
 HWND hMenu = NULL, hStatus = NULL, hCheck = NULL, hGame = NULL;
 HWND hSlDist = NULL, hSlSpeed = NULL, hSlRot = NULL;
 HWND hLblDist = NULL, hLblSpeed = NULL, hLblRot = NULL, hLblFoot = NULL;
+HWND hLblEsp = NULL, hTabCam = NULL, hTabEsp = NULL;
+HWND hLblEspDist = NULL, hSlEspDist = NULL;
+HWND hFovCheck = NULL, hLblFov = NULL, hSlFov = NULL;
+HWND hEsp[9] = { 0 }; // ID 10,12,13,14,15,20,18,21,22
+int g_tab = 0;        // 0=Camera, 1=ESP
 HFONT hFontTitle = NULL, hFontHead = NULL, hFontNorm = NULL;
 HBRUSH hbrBack = NULL;
 HMODULE hSelf = NULL; bool menuVisible = false;
 bool g_unlockChecked = false;
 
-volatile bool  unlocked = false;
+volatile bool unlocked = false;
 volatile float g_targetDist = 15.0f;
 volatile float g_curDist = 15.0f;
+
+// ---- FOV ----
+volatile bool  g_fovEnabled = false;
+volatile float g_fovTarget = 90.0f;
+volatile float g_fovSaved = 0.0f;
+volatile bool  g_fovHasSaved = false;
 
 static LARGE_INTEGER g_qpcFreq = { 0 };
 static LARGE_INTEGER g_qpcLast = { 0 };
 
 CRITICAL_SECTION g_cs;
-bool  g_csReady = false;
+bool g_csReady = false;
 volatile LONG g_pending = 0;
-int   g_reqState = 0;
-char  g_luaQ[16][128];
-int   g_luaCount = 0;
+int g_reqState = 0;
+char g_luaQ[16][128];
+int g_luaCount = 0;
 
 void Log(const char* t) {
     FILE* f; if (fopen_s(&f, "CameraMod_Log.txt", "a") == 0) {
@@ -124,7 +136,7 @@ static void DrainPending() {
     int st = 0; char lua[16][128]; int n = 0;
     EnterCriticalSection(&g_cs);
     st = g_reqState; g_reqState = 0;
-    n = g_luaCount; for (int i = 0;i < n;i++) strcpy_s(lua[i], sizeof(lua[0]), g_luaQ[i]); g_luaCount = 0;
+    n = g_luaCount; for (int i = 0; i < n; i++) strcpy_s(lua[i], sizeof(lua[0]), g_luaQ[i]); g_luaCount = 0;
     g_pending = 0;
     LeaveCriticalSection(&g_cs);
 
@@ -145,7 +157,7 @@ static void DrainPending() {
         g_curDist = 50.0f; g_targetDist = 50.0f;
         DWORD cam = GetActiveCamera(); if (cam) { __try { PinDistance(cam, 50.0f); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     }
-    for (int i = 0;i < n;i++) { __try { ExecuteBuffer(lua[i], "CameraMod", 0); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+    for (int i = 0; i < n; i++) { __try { ExecuteBuffer(lua[i], "CameraMod", 0); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 }
 
 typedef void(__fastcall* CamUpd_t)(void* ecx, void* edx, int a1, int a2);
@@ -175,6 +187,21 @@ void __fastcall hkCamUpd(void* ecx, void* edx, int a1, int a2) {
         __try { if (ecx) PinDistance((DWORD)ecx, g_curDist); }
         __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
+
+    if (ecx) {
+        __try {
+            float* pf = (float*)((DWORD)ecx + CAM_FOV_OFFSET);
+            if (g_fovEnabled) {
+                if (!g_fovHasSaved) { g_fovSaved = *pf; g_fovHasSaved = true; }
+                *pf = g_fovTarget * DEG2RAD;
+            }
+            else if (g_fovHasSaved) {
+                *pf = g_fovSaved;
+                g_fovHasSaved = false;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
 }
 
 int SliderPos(HWND s) { return (int)SendMessage(s, TBM_GETPOS, 0, 0); }
@@ -183,7 +210,15 @@ void UpdateLabels() {
     char b[96];
     sprintf_s(b, "Max Camera Distance:   %d yd", SliderPos(hSlDist)); SetWindowTextA(hLblDist, b);
     sprintf_s(b, "Zoom Speed:   %d", SliderPos(hSlSpeed)); SetWindowTextA(hLblSpeed, b);
-    sprintf_s(b, "Rotation Speed:   %d", SliderPos(hSlRot));   SetWindowTextA(hLblRot, b);
+    sprintf_s(b, "Rotation Speed:   %d", SliderPos(hSlRot)); SetWindowTextA(hLblRot, b);
+}
+void UpdateFovLabel() {
+    if (!hLblFov) return;
+    char b[96]; sprintf_s(b, "FOV (zoom out):   %d deg", SliderPos(hSlFov)); SetWindowTextA(hLblFov, b);
+}
+void UpdateEspLabels() {
+    if (!hLblEspDist) return;
+    char b[96]; sprintf_s(b, "ESP distance:   %d yd", SliderPos(hSlEspDist)); SetWindowTextA(hLblEspDist, b);
 }
 
 WNDPROC oGameWndProc = NULL;
@@ -257,13 +292,13 @@ static void PaintFrame(HWND h, HDC dc) {
     Rectangle(dc, rc.left + 6, rc.top + 6, rc.right - 6, rc.bottom - 6);
 
     SelectObject(dc, divPen);
-    MoveToEx(dc, 16, 50, NULL);            LineTo(dc, rc.right - 16, 50);
-    MoveToEx(dc, 16, rc.bottom - 40, NULL);  LineTo(dc, rc.right - 16, rc.bottom - 40);
+    MoveToEx(dc, 16, 88, NULL); LineTo(dc, rc.right - 16, 88);
+    MoveToEx(dc, 16, rc.bottom - 40, NULL); LineTo(dc, rc.right - 16, rc.bottom - 40);
 
     HFONT oldF = (HFONT)SelectObject(dc, hFontTitle);
     SetBkMode(dc, TRANSPARENT);
     RECT tr = { 0,12,rc.right,44 };
-    SetTextColor(dc, RGB(0, 0, 0));  OffsetRect(&tr, 1, 2);
+    SetTextColor(dc, RGB(0, 0, 0)); OffsetRect(&tr, 1, 2);
     DrawTextA(dc, "YamiYami", -1, &tr, DT_CENTER | DT_SINGLELINE);
     OffsetRect(&tr, -1, -2);
     SetTextColor(dc, CLR_GOLD);
@@ -273,25 +308,67 @@ static void PaintFrame(HWND h, HDC dc) {
     DeleteObject(goldPen); DeleteObject(goldPen2); DeleteObject(divPen);
 }
 
+static void DrawCheck(LPDRAWITEMSTRUCT d, const char* label, bool checked, bool bigFont) {
+    RECT rc = d->rcItem;
+    FillRect(d->hDC, &rc, hbrBack);
+    int bs = 18, by = rc.top + ((rc.bottom - rc.top) - bs) / 2;
+    RECT box = { rc.left, by, rc.left + bs, by + bs };
+    HBRUSH inr = CreateSolidBrush(CLR_BOX); FillRect(d->hDC, &box, inr); DeleteObject(inr);
+    HBRUSH gld = CreateSolidBrush(CLR_GOLD); FrameRect(d->hDC, &box, gld); DeleteObject(gld);
+    if (checked) {
+        RECT ck = { box.left + 4, box.top + 4, box.right - 4, box.bottom - 4 };
+        HBRUSH f = CreateSolidBrush(CLR_GOLD); FillRect(d->hDC, &ck, f); DeleteObject(f);
+    }
+    SetBkMode(d->hDC, TRANSPARENT);
+    SetTextColor(d->hDC, checked ? CLR_GOLD : CLR_TEXT);
+    HFONT of = (HFONT)SelectObject(d->hDC, bigFont ? hFontHead : hFontNorm);
+    RECT tr = { box.right + 10, rc.top, rc.right, rc.bottom };
+    DrawTextA(d->hDC, label, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(d->hDC, of);
+}
+
+static void DrawTab(LPDRAWITEMSTRUCT d, const char* label, bool active) {
+    RECT rc = d->rcItem;
+    HBRUSH bg = CreateSolidBrush(active ? CLR_GOLDDK : CLR_BOX);
+    FillRect(d->hDC, &rc, bg); DeleteObject(bg);
+    HBRUSH fr = CreateSolidBrush(CLR_GOLD); FrameRect(d->hDC, &rc, fr); DeleteObject(fr);
+    SetBkMode(d->hDC, TRANSPARENT);
+    SetTextColor(d->hDC, active ? CLR_GOLD : CLR_TEXT);
+    HFONT of = (HFONT)SelectObject(d->hDC, hFontHead);
+    DrawTextA(d->hDC, label, -1, &rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(d->hDC, of);
+}
+
+static void ShowTab(int t) {
+    g_tab = t;
+    int cam = (t == 0) ? SW_SHOW : SW_HIDE;
+    int esp = (t == 1) ? SW_SHOW : SW_HIDE;
+    ShowWindow(hStatus, cam);   ShowWindow(hCheck, cam);
+    ShowWindow(hLblDist, cam);  ShowWindow(hSlDist, cam);
+    ShowWindow(hLblSpeed, cam); ShowWindow(hSlSpeed, cam);
+    ShowWindow(hLblRot, cam);   ShowWindow(hSlRot, cam);
+    ShowWindow(hFovCheck, cam); ShowWindow(hLblFov, cam); ShowWindow(hSlFov, cam);
+    ShowWindow(hLblEsp, esp);
+    for (int i = 0; i < 9; i++) ShowWindow(hEsp[i], esp);
+    ShowWindow(hLblEspDist, esp); ShowWindow(hSlEspDist, esp);
+    InvalidateRect(hTabCam, NULL, TRUE);
+    InvalidateRect(hTabEsp, NULL, TRUE);
+}
+
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_TOGGLEMENU:
         if (w) BringMenuToFront(h);
-        else  ShowWindow(h, SW_HIDE);
+        else ShowWindow(h, SW_HIDE);
         return 0;
-    case WM_REFRESHLBL:
-        UpdateLabels();
-        return 0;
+    case WM_REFRESHLBL: UpdateLabels(); return 0;
     case WM_SETDIST:
         if (hSlDist) { SendMessage(hSlDist, TBM_SETPOS, TRUE, (int)l); UpdateLabels(); }
         return 0;
-    case WM_ERASEBKGND:
-        return 1;
+    case WM_ERASEBKGND: return 1;
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
-        PaintFrame(h, dc);
-        EndPaint(h, &ps);
-        return 0;
+        PaintFrame(h, dc); EndPaint(h, &ps); return 0;
     }
     case WM_NCHITTEST: {
         int sx = (int)(short)LOWORD(l), sy = (int)(short)HIWORD(l);
@@ -305,30 +382,27 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_CTLCOLORSTATIC: {
         HDC dc = (HDC)w; HWND c = (HWND)l; SetBkMode(dc, TRANSPARENT);
-        bool gold = (c == hStatus || c == hLblDist || c == hLblSpeed || c == hLblRot);
+        bool gold = (c == hStatus || c == hLblDist || c == hLblSpeed || c == hLblRot ||
+            c == hLblFov || c == hLblEsp || c == hLblEspDist);
         SetTextColor(dc, gold ? CLR_GOLD : CLR_TEXT);
         return (LRESULT)hbrBack;
     }
     case WM_DRAWITEM: {
         LPDRAWITEMSTRUCT d = (LPDRAWITEMSTRUCT)l;
-        if (d->CtlID == 1) {
-            RECT rc = d->rcItem;
-            FillRect(d->hDC, &rc, hbrBack);
-            int bs = 18, by = rc.top + ((rc.bottom - rc.top) - bs) / 2;
-            RECT box = { rc.left,by,rc.left + bs,by + bs };
-            HBRUSH inr = CreateSolidBrush(CLR_BOX); FillRect(d->hDC, &box, inr); DeleteObject(inr);
-            HBRUSH gld = CreateSolidBrush(CLR_GOLD); FrameRect(d->hDC, &box, gld); DeleteObject(gld);
-            if (g_unlockChecked) {
-                RECT ck = { box.left + 4,box.top + 4,box.right - 4,box.bottom - 4 };
-                HBRUSH f = CreateSolidBrush(CLR_GOLD); FillRect(d->hDC, &ck, f); DeleteObject(f);
-            }
-            SetBkMode(d->hDC, TRANSPARENT);
-            SetTextColor(d->hDC, g_unlockChecked ? CLR_GOLD : CLR_TEXT);
-            HFONT of = (HFONT)SelectObject(d->hDC, hFontHead);
-            RECT tr = { box.right + 10,rc.top,rc.right,rc.bottom };
-            DrawTextA(d->hDC, "Unlock Camera Distance", -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-            SelectObject(d->hDC, of);
-            return TRUE;
+        switch (d->CtlID) {
+        case 100: DrawTab(d, "Camera", g_tab == 0); return TRUE;
+        case 101: DrawTab(d, "ESP", g_tab == 1); return TRUE;
+        case 1:  DrawCheck(d, "Unlock Camera Distance", g_unlockChecked, true); return TRUE;
+        case 2:  DrawCheck(d, "Enable FOV (zoom out)", g_fovEnabled, true); return TRUE;
+        case 10: DrawCheck(d, "Enable ESP", g_espEnabled, false); return TRUE;
+        case 12: DrawCheck(d, "Names", g_drawNames, false); return TRUE;
+        case 13: DrawCheck(d, "Health Bars", g_drawHP, false); return TRUE;
+        case 14: DrawCheck(d, "Distance", g_drawDistance, false); return TRUE;
+        case 15: DrawCheck(d, "Tracers", g_drawTracers, false); return TRUE;
+        case 20: DrawCheck(d, "Chams (model wallhack)", g_chamsEnabled, false); return TRUE;
+        case 18: DrawCheck(d, "Show Self", g_drawSelf, false); return TRUE;
+        case 21: DrawCheck(d, "Show Players", g_espShowPlayers, false); return TRUE;
+        case 22: DrawCheck(d, "Show NPCs (Mobs)", g_espShowNpcs, false); return TRUE;
         }
         break;
     }
@@ -345,14 +419,40 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         else if (released && s == hSlSpeed) { QueueCVarF("cameraDistanceMoveSpeed", (float)SliderPos(s)); }
         else if (released && s == hSlRot) { QueueCVarF("cameraYawMoveSpeed", (float)SliderPos(s)); }
+        else if (s == hSlFov) { g_fovTarget = (float)SliderPos(s); UpdateFovLabel(); }
+        else if (s == hSlEspDist) { g_espDist = (float)SliderPos(s); UpdateEspLabels(); }
         UpdateLabels();
         break;
     }
     case WM_COMMAND:
-        if (LOWORD(w) == 1 && HIWORD(w) == BN_CLICKED) {
-            g_unlockChecked = !g_unlockChecked;
-            InvalidateRect(hCheck, NULL, TRUE);
-            ApplyUnlock(g_unlockChecked);
+        if (HIWORD(w) == BN_CLICKED) {
+            UINT id = LOWORD(w);
+            if (id == 100) { ShowTab(0); }
+            else if (id == 101) { ShowTab(1); }
+            else if (id == 1) {
+                g_unlockChecked = !g_unlockChecked;
+                InvalidateRect(hCheck, NULL, TRUE);
+                ApplyUnlock(g_unlockChecked);
+            }
+            else if (id == 2) {
+                g_fovEnabled = !g_fovEnabled;
+                if (g_fovEnabled) g_fovTarget = (float)SliderPos(hSlFov);
+                InvalidateRect(hFovCheck, NULL, TRUE);
+            }
+            else if (id >= 10 && id <= 22) {
+                switch (id) {
+                case 10: g_espEnabled = !g_espEnabled;   break;
+                case 12: g_drawNames = !g_drawNames;    break;
+                case 13: g_drawHP = !g_drawHP;       break;
+                case 14: g_drawDistance = !g_drawDistance; break;
+                case 15: g_drawTracers = !g_drawTracers;  break;
+                case 20: g_chamsEnabled = !g_chamsEnabled; break;
+                case 18: g_drawSelf = !g_drawSelf;     break;
+                case 21: g_espShowPlayers = !g_espShowPlayers; break;
+                case 22: g_espShowNpcs = !g_espShowNpcs;    break;
+                }
+                InvalidateRect((HWND)l, NULL, TRUE);
+            }
         }
         break;
     case WM_CLOSE: ShowWindow(h, SW_HIDE); menuVisible = false; return 0;
@@ -371,6 +471,10 @@ static HWND mkSlider(int x, int y, int wd, int lo, int hi, int pos) {
     SendMessage(o, TBM_SETRANGE, TRUE, MAKELPARAM(lo, hi));
     SendMessage(o, TBM_SETPOS, TRUE, pos);
     return o;
+}
+static HWND mkCheck(int id, int x, int y, int wd) {
+    return CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+        x, y, wd, 24, hMenu, (HMENU)(INT_PTR)id, hSelf, NULL);
 }
 
 HWND FindGameWindow() {
@@ -392,26 +496,39 @@ DWORD WINAPI MenuThread(LPVOID) {
     wc.hbrBackground = hbrBack; wc.lpszClassName = "CamMod"; wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassA(&wc);
 
-    const int W = 452, H = 404;
+    const int W = 452, H = 500;
     int x = 200, y = 200; RECT gr;
     if (hGame && GetWindowRect(hGame, &gr)) { x = gr.left + ((gr.right - gr.left) - W) / 2; y = gr.top + ((gr.bottom - gr.top) - H) / 2; }
 
     hMenu = CreateWindowExA(WS_EX_TOPMOST, "CamMod", "YamiYami",
         WS_POPUP | WS_CLIPCHILDREN, x, y, W, H, hGame, NULL, hSelf, NULL);
 
-    hStatus = mkLabel("Status:  LOCKED (50 yd)", 24, 60, 404, hFontNorm);
+    hTabCam = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 24, 52, 198, 30, hMenu, (HMENU)100, hSelf, NULL);
+    hTabEsp = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 230, 52, 198, 30, hMenu, (HMENU)101, hSelf, NULL);
 
-    hCheck = CreateWindowA("BUTTON", "Unlock Camera Distance",
-        WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 24, 90, 404, 26, hMenu, (HMENU)1, hSelf, NULL);
-    SendMessage(hCheck, WM_SETFONT, (WPARAM)hFontHead, TRUE);
+    // Camera tab
+    hStatus = mkLabel("Status:  LOCKED (50 yd)", 24, 100, 404, hFontNorm);
+    hCheck = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 24, 126, 404, 26, hMenu, (HMENU)1, hSelf, NULL);
+    hLblDist = mkLabel("Max Camera Distance:   15 yd", 24, 158, 404, hFontHead); hSlDist = mkSlider(24, 182, 404, 15, 1000, 15);
+    hLblSpeed = mkLabel("Zoom Speed:   20", 24, 218, 404, hFontHead); hSlSpeed = mkSlider(24, 242, 404, 5, 50, 20);
+    hLblRot = mkLabel("Rotation Speed:   180", 24, 278, 404, hFontHead); hSlRot = mkSlider(24, 302, 404, 90, 360, 180);
+    hFovCheck = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 24, 340, 404, 26, hMenu, (HMENU)2, hSelf, NULL);
+    hLblFov = mkLabel("FOV (zoom out):   90 deg", 24, 372, 404, hFontHead); hSlFov = mkSlider(24, 396, 404, 40, 150, 90);
 
-    hLblDist = mkLabel("Max Camera Distance:   15 yd", 24, 126, 404, hFontHead); hSlDist = mkSlider(24, 152, 404, 15, 1000, 15);
-    hLblSpeed = mkLabel("Zoom Speed:   20", 24, 192, 404, hFontHead); hSlSpeed = mkSlider(24, 218, 404, 5, 50, 20);
-    hLblRot = mkLabel("Rotation Speed:   180", 24, 258, 404, hFontHead); hSlRot = mkSlider(24, 284, 404, 90, 360, 180);
+    // ESP tab
+    hLblEsp = mkLabel("ESP", 24, 100, 404, hFontHead);
+    hEsp[0] = mkCheck(10, 24, 134, 190);   hEsp[1] = mkCheck(12, 238, 134, 190);
+    hEsp[2] = mkCheck(13, 24, 166, 190);   hEsp[3] = mkCheck(14, 238, 166, 190);
+    hEsp[4] = mkCheck(15, 24, 198, 190);   hEsp[5] = mkCheck(20, 238, 198, 190);
+    hEsp[6] = mkCheck(18, 24, 230, 190);   hEsp[7] = mkCheck(21, 238, 230, 190);
+    hEsp[8] = mkCheck(22, 24, 262, 190);
+    hLblEspDist = mkLabel("ESP distance:   200 yd", 24, 300, 404, hFontHead);
+    hSlEspDist = mkSlider(24, 326, 404, 20, 1000, 200);
 
     hLblFoot = mkLabel("Menu:  '      Unload:  END      Wheel zooms to 1000 when ON", 24, H - 34, 404, hFontNorm);
 
     EnableWindow(hSlDist, FALSE);
+    ShowTab(0);
 
     InstallWheelHook();
     if (!oGameWndProc) Log("WARNING: could not subclass game window for wheel zoom (slider still works)");
@@ -430,15 +547,13 @@ DWORD WINAPI MainThread(LPVOID p) {
     if (MH_Initialize() == MH_OK &&
         MH_CreateHook((LPVOID)CAM_UPDATE_ADDR, &hkCamUpd, (LPVOID*)&oCamUpd) == MH_OK &&
         MH_EnableHook((LPVOID)CAM_UPDATE_ADDR) == MH_OK) {
-        Log("camera update hook installed (0x606F90); distance state=0x1E8");
+        Log("camera update hook installed (0x606F90); distance=0x1E8, fov=0x40");
     }
     else {
         Log("ERROR: failed to install camera hook");
     }
 
     CreateThread(NULL, 0, MenuThread, NULL, 0, NULL);
-
-    // ==== запуск ESP (D3D9-хуки ставит EspInitThread, MinHook уже инициализирован) ====
     CreateThread(NULL, 0, EspInitThread, NULL, 0, NULL);
     Log("ESP init thread started");
 
@@ -451,23 +566,15 @@ DWORD WINAPI MainThread(LPVOID p) {
         Sleep(20);
     }
 
-    // 1) вернуть состояние камеры на игровом потоке
+    g_fovEnabled = false;
     RequestState(2);
     Sleep(150);
     unlocked = false;
-
-    // 2) снять in-process хук колеса
     RemoveWheelHook();
-
-    // 3) выключить ESP (снимает свои D3D9-хуки + ImGui) ДО MH_Uninitialize
     EspShutdown();
-
-    // 4) снять хук камеры и деинициализировать MinHook (единый владелец)
     MH_DisableHook((LPVOID)CAM_UPDATE_ADDR);
     Sleep(30);
     MH_Uninitialize();
-
-    // 5) идемпотентный fallback
     PatchClamp(false);
     SetMaxDistanceMemory(50.0f);
     SetBothDistance(50.0f);
