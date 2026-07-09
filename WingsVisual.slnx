@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="WingsVisual/WingsVisual.vcxproj" Id="b9b4aa6d-b2f6-4901-af8a-995c41612e77" />
+</Solution>
