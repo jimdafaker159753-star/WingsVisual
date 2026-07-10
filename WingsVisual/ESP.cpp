@@ -42,11 +42,18 @@ static const UINT YC_INIT = WM_APP + 70, YC_REMOVE = WM_APP + 71;
 static const int YC_COMBO = 4100;
 static const UINT_PTR YC_TIMER = 4077;
 struct YCState {
-	uint32_t* c;
-	const char* title;
-	bool wheel, value;
-}
-;
+    uint32_t* c;
+    const char* title;
+    bool wheel;
+    bool value;
+
+    HDC memoryDc;
+    HBITMAP bitmap;
+    HBITMAP oldBitmap;
+    uint32_t* pixels;
+    int bufferWidth;
+    int bufferHeight;
+};
 static YCState ysv{}, ysh{};
 static float yc01(float v) {
 	return v < 0 ? 0 : v>1 ? 1 : v;
@@ -99,56 +106,172 @@ static void ycRGB(uint32_t c, float& h, float& s, float& v) {
 		if (h < 0)h += 1;
 	}
 }
-static void ycPaint(HWND w, YCState* st) {
-	PAINTSTRUCT ps{};
-	HDC dc = BeginPaint(w, &ps);
-	RECT rc{};
-	GetClientRect(w, &rc);
-	int W = rc.right, H = rc.bottom;
-	HBRUSH bg = CreateSolidBrush(RGB(18, 16, 12));
-	FillRect(dc, &rc, bg);
-	DeleteObject(bg);
-	if (!st || !st->c) {
-		EndPaint(w, &ps);
-		return;
-	}
-	float h, s, v;
-	ycRGB(*st->c, h, s, v);
-	const int cx = 68, cy = 82, R = 56;
-	for (int y = 25; y < 140; y++)for (int x = 10; x < 175; x++) {
-		float dx = x - cx, dy = y - cy, d = sqrtf(dx * dx + dy * dy);
-		uint32_t c = 0;
-		if (d <= R) {
-			float hh = atan2f(dy, dx) / 6.2831853f;
-			if (hh < 0)hh += 1;
-			c = ycHSV(hh, d / R, v);
-		}
-		else if (x >= 145 && x <= 163) {
-			c = ycHSV(h, s, 1 - (y - 25) / 115.f);
-		}
-		if (c) {
-			SetPixel(dc, x, y, RGB((c >> 16) & 255, (c >> 8) & 255, c & 255));
-		}
-	}
-	SetBkMode(dc, TRANSPARENT);
-	SetTextColor(dc, RGB(255, 209, 10));
-	SelectObject(dc, hFontHead ? hFontHead : GetStockObject(DEFAULT_GUI_FONT));
-	TextOutA(dc, 4, 3, st->title, (int)strlen(st->title));
-	int px = cx + (int)(cosf(h * 6.2831853f) * s * R), py = cy + (int)(sinf(h * 6.2831853f) * s * R);
-	HPEN p = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-	SelectObject(dc, p);
-	SelectObject(dc, GetStockObject(NULL_BRUSH));
-	Ellipse(dc, px - 5, py - 5, px + 6, py + 6);
-	int vy = 25 + (int)((1 - v) * 115);
-	MoveToEx(dc, 142, vy, 0);
-	LineTo(dc, 167, vy);
-	DeleteObject(p);
-	char t[16];
-	sprintf_s(t, "#%06X", *st->c & 0xFFFFFF);
-	SetTextColor(dc, RGB(240, 225, 180));
-	TextOutA(dc, 10, 148, t, (int)strlen(t));
-	EndPaint(w, &ps);
+static void ycReleaseBuffer(YCState* state) {
+    if (!state) return;
+
+    if (state->memoryDc && state->oldBitmap) {
+        SelectObject(state->memoryDc, state->oldBitmap);
+    }
+    if (state->bitmap) {
+        DeleteObject(state->bitmap);
+    }
+    if (state->memoryDc) {
+        DeleteDC(state->memoryDc);
+    }
+
+    state->memoryDc = nullptr;
+    state->bitmap = nullptr;
+    state->oldBitmap = nullptr;
+    state->pixels = nullptr;
+    state->bufferWidth = 0;
+    state->bufferHeight = 0;
 }
+
+static bool ycEnsureBuffer(HWND window, YCState* state, int width, int height) {
+    if (!state || width <= 0 || height <= 0) return false;
+
+    if (state->memoryDc && state->bitmap && state->pixels &&
+        state->bufferWidth == width && state->bufferHeight == height) {
+        return true;
+    }
+
+    ycReleaseBuffer(state);
+
+    HDC windowDc = GetDC(window);
+    if (!windowDc) return false;
+
+    BITMAPINFO bitmapInfo{};
+    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    void* rawPixels = nullptr;
+    HBITMAP bitmap = CreateDIBSection(
+        windowDc,
+        &bitmapInfo,
+        DIB_RGB_COLORS,
+        &rawPixels,
+        nullptr,
+        0);
+
+    HDC memoryDc = CreateCompatibleDC(windowDc);
+    ReleaseDC(window, windowDc);
+
+    if (!bitmap || !memoryDc || !rawPixels) {
+        if (bitmap) DeleteObject(bitmap);
+        if (memoryDc) DeleteDC(memoryDc);
+        return false;
+    }
+
+    state->memoryDc = memoryDc;
+    state->bitmap = bitmap;
+    state->oldBitmap = static_cast<HBITMAP>(SelectObject(memoryDc, bitmap));
+    state->pixels = static_cast<uint32_t*>(rawPixels);
+    state->bufferWidth = width;
+    state->bufferHeight = height;
+    return true;
+}
+
+static void ycPaint(HWND window, YCState* state) {
+    PAINTSTRUCT paint{};
+    HDC windowDc = BeginPaint(window, &paint);
+
+    RECT client{};
+    GetClientRect(window, &client);
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+
+    if (!windowDc || !state || !state->c ||
+        !ycEnsureBuffer(window, state, width, height)) {
+        EndPaint(window, &paint);
+        return;
+    }
+
+    const uint32_t background = 0x0012100Cu;
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    for (size_t i = 0; i < pixelCount; ++i) {
+        state->pixels[i] = background;
+    }
+
+    float hue = 0.0f;
+    float saturation = 0.0f;
+    float brightness = 1.0f;
+    ycRGB(*state->c, hue, saturation, brightness);
+
+    const int centerX = 68;
+    const int centerY = 82;
+    const int radius = 56;
+
+    for (int y = 25; y < 140 && y < height; ++y) {
+        for (int x = 10; x < 175 && x < width; ++x) {
+            const float dx = static_cast<float>(x - centerX);
+            const float dy = static_cast<float>(y - centerY);
+            const float distance = sqrtf(dx * dx + dy * dy);
+            uint32_t color = 0;
+
+            if (distance <= static_cast<float>(radius)) {
+                float pixelHue = atan2f(dy, dx) / 6.2831853f;
+                if (pixelHue < 0.0f) pixelHue += 1.0f;
+                color = ycHSV(pixelHue, distance / radius, brightness);
+            } else if (x >= 145 && x <= 163) {
+                const float pixelBrightness =
+                    1.0f - static_cast<float>(y - 25) / 115.0f;
+                color = ycHSV(hue, saturation, pixelBrightness);
+            }
+
+            if (color != 0) {
+                state->pixels[static_cast<size_t>(y) * width + x] =
+                    color & 0x00FFFFFFu;
+            }
+        }
+    }
+
+    HDC dc = state->memoryDc;
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 209, 10));
+
+    HFONT selectedFont = hFontHead
+        ? hFontHead
+        : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    HFONT oldFont = static_cast<HFONT>(SelectObject(dc, selectedFont));
+
+    TextOutA(dc, 4, 3, state->title, static_cast<int>(strlen(state->title)));
+
+    const float angle = hue * 6.2831853f;
+    const int markerX = centerX +
+        static_cast<int>(cosf(angle) * saturation * radius);
+    const int markerY = centerY +
+        static_cast<int>(sinf(angle) * saturation * radius);
+
+    HPEN markerPen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+    HPEN oldPen = static_cast<HPEN>(SelectObject(dc, markerPen));
+    HBRUSH oldBrush = static_cast<HBRUSH>(
+        SelectObject(dc, GetStockObject(NULL_BRUSH)));
+
+    Ellipse(dc, markerX - 5, markerY - 5, markerX + 6, markerY + 6);
+
+    const int brightnessY = 25 +
+        static_cast<int>((1.0f - brightness) * 115.0f);
+    MoveToEx(dc, 142, brightnessY, nullptr);
+    LineTo(dc, 167, brightnessY);
+
+    char text[16];
+    sprintf_s(text, "#%06X", *state->c & 0x00FFFFFFu);
+    SetTextColor(dc, RGB(240, 225, 180));
+    TextOutA(dc, 10, 148, text, static_cast<int>(strlen(text)));
+
+    BitBlt(windowDc, 0, 0, width, height, dc, 0, 0, SRCCOPY);
+
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldFont);
+    DeleteObject(markerPen);
+    EndPaint(window, &paint);
+}
+
 static void ycMouse(HWND w, YCState* st, int x, int y) {
 	float h, s, v;
 	ycRGB(*st->c, h, s, v);
@@ -168,7 +291,12 @@ static LRESULT CALLBACK ycWheel(HWND w, UINT m, WPARAM a, LPARAM l) {
 		SetWindowLongPtrA(w, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTA*)l)->lpCreateParams);
 		return TRUE;
 	}
-	if (m == WM_ERASEBKGND)return 1;
+	if (m == WM_NCDESTROY) {
+    ycReleaseBuffer(st);
+    SetWindowLongPtrA(w, GWLP_USERDATA, 0);
+    return DefWindowProcA(w, m, a, l);
+}
+if (m == WM_ERASEBKGND) return 1;
 	if (m == WM_PAINT) {
 		ycPaint(w, st);
 		return 0;
@@ -766,43 +894,95 @@ static HRESULT WINAPI hkDIP(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT ba
 		if (materialAlpha > 0.01f && materialAlpha < 0.90f)
 			return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
 	}
+    g_m2Anchors[idx].hits++;
+    g_paintedFrame++;
 
-	g_m2Anchors[idx].hits++;
-	g_paintedFrame++;
+    HRESULT baseResult = D3D_OK;
+    bool originalDrawn = false;
+    ChamsState saved{};
+    bool stateSaved = false;
 
-	// Сначала игра рисует нормальную текстурированную модель своим shader.
-	// Затем добавляются два лёгких слоя: скрытый и видимый.
-	HRESULT baseResult = oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
-	if (FAILED(baseResult)) return baseResult;
+    __try {
+        // Hidden pass must run before the original model writes depth.
+        SaveState(dev, saved);
+        stateSaved = true;
 
-	ChamsState saved{};
-	bool stateSaved = false;
-	__try {
-		SaveState(dev, saved);
-		stateSaved = true;
+        SetSoftOverlayState(
+            dev,
+            ColorWithAlpha(g_chamsHiddenByCategory[g_espCategory], 160),
+            // Stable hidden pass: ignore the current depth-buffer contents.
+            D3DCMP_ALWAYS);
 
-		// Только пиксели, закрытые стеной/геометрией мира.
-		SetSoftOverlayState(dev,
-			ColorWithAlpha(g_chamsHiddenByCategory[g_espCategory], 82),
-			D3DCMP_GREATER);
-		oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
+        oDIP(
+            dev,
+            type,
+            baseVI,
+            minVI,
+            numV,
+            startIdx,
+            primCount);
 
-		// Мягкий оттенок поверх видимой оригинальной модели.
-		SetSoftOverlayState(dev,
-			ColorWithAlpha(g_chamsVisibleByCategory[g_espCategory], 54),
-			D3DCMP_LESSEQUAL);
-		oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
+        RestoreState(dev, saved);
+        stateSaved = false;
 
-		RestoreState(dev, saved);
-		stateSaved = false;
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER) {
-		if (stateSaved) RestoreState(dev, saved);
-		return baseResult;
-	}
-	return baseResult;
+        // Draw the normal game model with its original states and shaders.
+        baseResult = oDIP(
+            dev,
+            type,
+            baseVI,
+            minVI,
+            numV,
+            startIdx,
+            primCount);
+
+        originalDrawn = true;
+        if (FAILED(baseResult)) {
+            return baseResult;
+        }
+
+        // Add a soft tint only to the visible part.
+        SaveState(dev, saved);
+        stateSaved = true;
+
+        SetSoftOverlayState(
+            dev,
+            ColorWithAlpha(g_chamsVisibleByCategory[g_espCategory], 54),
+            D3DCMP_LESSEQUAL);
+
+        oDIP(
+            dev,
+            type,
+            baseVI,
+            minVI,
+            numV,
+            startIdx,
+            primCount);
+
+        RestoreState(dev, saved);
+        stateSaved = false;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (stateSaved) {
+            RestoreState(dev, saved);
+            stateSaved = false;
+        }
+
+        if (!originalDrawn) {
+            return oDIP(
+                dev,
+                type,
+                baseVI,
+                minVI,
+                numV,
+                startIdx,
+                primCount);
+        }
+
+        return baseResult;
+    }
+
+    return baseResult;
 }
-
 
 static void AppendGameObjectsToEsp() {
 	if (g_espCategory != ESP_CATEGORY_RESOURCES) return;
