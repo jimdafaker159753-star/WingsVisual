@@ -12,6 +12,231 @@ extern void EspShutdown();
 typedef int(__cdecl* ExecBuf_t)(const char*, const char*, int);
 ExecBuf_t ExecuteBuffer = (ExecBuf_t)0x00819210;
 
+static const char* kWarlockAutoKickInitLua = R"WARLOCK_INIT(-- AutoKick (WARLOCK) v5 - Spell Lock (Felhunter)
+if AK_Init ~= 5 then
+AK_Init = 5
+
+AK_KickIDs = {
+635, 19750, 2060, 2061, 47540, 596, 32546,
+331, 8004, 1064, 5185, 50464, 8936, 740, 64843,
+118, 51514, 605, 6358, 2637, 710, 5782,
+51505, 50796, 6353, 47610, 8092, 15407, 689,
+2006, 7328, 2008, 50769, 20484,
+}
+AK_KickExtraNames = {}
+AK_ImmuneIDs = {
+31821,
+642,
+}
+AK_ImmuneExtraNames = {}
+
+AK_Instant = true
+AK_KickAll = false
+AK_Announce = true
+AK_CheckImmune = true
+AK_Throttle = 0.05
+AK_Delay = 0.10
+AK_PctMin = 40
+AK_PctMax = 70
+AK_Units = { "focus", "target" }
+
+AK_SpellLockID = 19647
+AK_SpellLockName = GetSpellInfo(AK_SpellLockID) or "Spell Lock"
+AK_LastTry = 0
+AK_ReadyAt = 0
+AK_ModTime = 0
+AK_AltTime = 0
+AK_CtrlTime = 0
+AK_ImmuneMsgAt = 0
+if AK_Enabled == nil then AK_Enabled = true end
+
+AK_KickNames = {}
+AK_KickCount = 0
+for _, id in ipairs(AK_KickIDs) do
+local n = GetSpellInfo(id)
+if n then
+AK_KickNames[n] = true
+AK_KickCount = AK_KickCount + 1
+end
+end
+for _, nm in ipairs(AK_KickExtraNames) do
+if nm and nm ~= "" then AK_KickNames[nm] = true end
+end
+
+AK_ImmuneNames = {}
+for _, id in ipairs(AK_ImmuneIDs) do
+local n = GetSpellInfo(id)
+if n then AK_ImmuneNames[n] = true end
+end
+for _, nm in ipairs(AK_ImmuneExtraNames) do
+if nm and nm ~= "" then AK_ImmuneNames[nm] = true end
+end
+
+function AK_Interruptable(unit)
+local name, _, _, _, st, et, _, _, notInt = UnitCastingInfo(unit)
+if name == nil then
+local cn, _, _, _, cst, cet, _, cNotInt = UnitChannelInfo(unit)
+name = cn
+st = cst
+et = cet
+notInt = cNotInt
+end
+if name == nil then return nil end
+if notInt == true then return nil end
+return name, st, et
+end
+
+function AK_ShouldKick(spellName)
+if AK_KickAll then return true end
+if spellName == nil then return false end
+return AK_KickNames[spellName] == true
+end
+
+function AK_IsImmune(unit)
+if not AK_CheckImmune then return false end
+if AK_ImmuneNames == nil then return false end
+for i = 1, 40 do
+local bn = UnitBuff(unit, i)
+if bn == nil then break end
+if AK_ImmuneNames[bn] then return true, bn end
+end
+return false
+end
+
+if DEFAULT_CHAT_FRAME then
+local mode = "INSTANT"
+if not AK_Instant then mode = "anti-fake" end
+DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[AutoKick v5]|r ready. Spells: " .. AK_KickCount .. ", mode: " .. mode .. ". RShift=on/off, RAlt=all, RCtrl=instant/anti-fake.")
+end
+end
+
+return false)WARLOCK_INIT";
+
+static const char* kWarlockAutoKickHotkeyLua = R"WARLOCK_HOTKEY(-- RShift=ON/OFF ; RAlt=kick all ; RCtrl=instant/anti-fake
+if AK_ModTime == nil then AK_ModTime = 0 end
+if AK_AltTime == nil then AK_AltTime = 0 end
+if AK_CtrlTime == nil then AK_CtrlTime = 0 end
+if AK_Enabled == nil then AK_Enabled = true end
+
+if IsRightShiftKeyDown() and not GetCurrentKeyBoardFocus() and (GetTime() - AK_ModTime) > 0.4 then
+AK_ModTime = GetTime()
+AK_Enabled = not AK_Enabled
+if DEFAULT_CHAT_FRAME then
+if AK_Enabled then
+DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[AutoKick] ON|r")
+else
+DEFAULT_CHAT_FRAME:AddMessage("|cFFFF0000[AutoKick] OFF|r")
+end
+end
+end
+
+if IsRightAltKeyDown() and not GetCurrentKeyBoardFocus() and (GetTime() - AK_AltTime) > 0.4 then
+AK_AltTime = GetTime()
+AK_KickAll = not AK_KickAll
+if DEFAULT_CHAT_FRAME then
+if AK_KickAll then
+DEFAULT_CHAT_FRAME:AddMessage("|cFFFFFF00[AutoKick] mode: KICK ALL|r")
+else
+DEFAULT_CHAT_FRAME:AddMessage("|cFFFFFF00[AutoKick] mode: list only|r")
+end
+end
+end
+
+if IsRightControlKeyDown() and not GetCurrentKeyBoardFocus() and (GetTime() - AK_CtrlTime) > 0.4 then
+AK_CtrlTime = GetTime()
+AK_Instant = not AK_Instant
+if DEFAULT_CHAT_FRAME then
+if AK_Instant then
+DEFAULT_CHAT_FRAME:AddMessage("|cFF00FFFF[AutoKick] mode: INSTANT|r")
+else
+DEFAULT_CHAT_FRAME:AddMessage("|cFF00FFFF[AutoKick] mode: ANTI-FAKE|r")
+end
+end
+end
+
+return false)WARLOCK_HOTKEY";
+
+static const char* kWarlockAutoKickMainLua = R"WARLOCK_MAIN(-- AutoKick Spell Lock v5: focus -> target
+if not AK_Enabled then return false end
+if not UnitExists("pet") or UnitIsDead("pet") then return false end
+if UnitIsDeadOrGhost("player") then return false end
+if AK_SpellLockName == nil then AK_SpellLockName = GetSpellInfo(19647) or "Spell Lock" end
+if AK_Units == nil then AK_Units = { "focus", "target" } end
+
+if AK_Interruptable == nil then
+function AK_Interruptable(unit)
+local nm, _, _, _, s2, e2, _, _, ni = UnitCastingInfo(unit)
+if nm == nil then
+local cn, _, _, _, cs, ce, _, cni = UnitChannelInfo(unit)
+nm = cn
+s2 = cs
+e2 = ce
+ni = cni
+end
+if nm == nil then return nil end
+if ni == true then return nil end
+return nm, s2, e2
+end
+end
+
+if AK_ShouldKick == nil then
+function AK_ShouldKick(sp)
+if AK_KickAll then return true end
+if sp == nil then return false end
+if AK_KickNames == nil then return false end
+return AK_KickNames[sp] == true
+end
+end
+
+if AK_LastTry == nil then AK_LastTry = 0 end
+if (GetTime() - AK_LastTry) < (AK_Throttle or 0.05) then return false end
+
+if AK_ReadyAt and GetTime() < AK_ReadyAt then return false end
+local cdStart, cdDur = GetSpellCooldown(AK_SpellLockName)
+if cdStart and cdStart > 0 and cdDur and cdDur > 1.5 then return false end
+
+for i = 1, table.getn(AK_Units) do
+local u = AK_Units[i]
+if UnitExists(u) and not UnitIsDeadOrGhost(u) and (UnitCanAttack("player", u) == 1) then
+local name, st, et = AK_Interruptable(u)
+if name and st and et and et > st and AK_ShouldKick(name) then
+local immune, buffName = false, nil
+if AK_IsImmune then immune, buffName = AK_IsImmune(u) end
+if immune then
+if AK_Announce and DEFAULT_CHAT_FRAME and (GetTime() - (AK_ImmuneMsgAt or 0)) > 3 then
+AK_ImmuneMsgAt = GetTime()
+DEFAULT_CHAT_FRAME:AddMessage("|cFFFF8000[AutoKick]|r immune (" .. tostring(buffName) .. ") - kick delayed")
+end
+else
+local fire = true
+if not AK_Instant then
+local timeSinceStart = (GetTime() * 1000 - st) / 1000
+local castTime = et - st
+local pct = timeSinceStart / castTime * 100000
+local threshold = math.random(AK_PctMin or 40, AK_PctMax or 70)
+if not (pct >= threshold and timeSinceStart >= (AK_Delay or 0.1)) then
+fire = false
+end
+end
+if fire then
+local inRange = IsSpellInRange(AK_SpellLockName, u)
+if inRange ~= 0 then
+RunMacroText("/cast [target=" .. u .. "] " .. AK_SpellLockName)
+AK_LastTry = GetTime()
+AK_ReadyAt = GetTime() + 24
+if AK_Announce and DEFAULT_CHAT_FRAME then
+DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[AutoKick]|r " .. name .. " -> " .. UnitName(u))
+end
+return false
+end
+end
+end
+end
+end
+end
+
+return false)WARLOCK_MAIN";
+
 #define CAM_LIMIT_ADDR   0x00A1E2FC
 #define CAM_MGR_PTR      0x00B7436C
 #define CAM_OBJ_OFFSET   0x7E20
@@ -42,15 +267,20 @@ ExecBuf_t ExecuteBuffer = (ExecBuf_t)0x00819210;
 HWND hMenu = NULL, hStatus = NULL, hCheck = NULL, hGame = NULL;
 HWND hSlDist = NULL, hSlSpeed = NULL, hSlRot = NULL;
 HWND hLblDist = NULL, hLblSpeed = NULL, hLblRot = NULL, hLblFoot = NULL;
-HWND hLblEsp = NULL, hTabCam = NULL, hTabEsp = NULL;
+HWND hLblEsp = NULL, hTabCam = NULL, hTabEsp = NULL, hTabHeroes = NULL;
 HWND hLblEspDist = NULL, hSlEspDist = NULL;
 HWND hFovCheck = NULL, hLblFov = NULL, hSlFov = NULL;
 HWND hEsp[9] = { 0 }; // ID 10,12,13,14,15,20,18,21,22
-int g_tab = 0;        // 0=Camera, 1=ESP
+HWND hLblHeroes = NULL, hHeroWarlockRow = NULL, hHeroWarlockCheck = NULL;
+HWND hHeroWarlockTitle = NULL, hHeroWarlockInfo = NULL, hHeroWarlockHint = NULL;
+int g_tab = 0;        // 0=Camera, 1=ESP, 2=Heroes
 HFONT hFontTitle = NULL, hFontHead = NULL, hFontNorm = NULL;
 HBRUSH hbrBack = NULL;
 HMODULE hSelf = NULL; bool menuVisible = false;
 bool g_unlockChecked = false;
+bool g_warlockExpanded = false;
+bool g_warlockEnabled = false;
+bool g_warlockInitPending = false;
 
 volatile bool unlocked = false;
 volatile float g_targetDist = 15.0f;
@@ -92,6 +322,22 @@ void RequestState(int st) {
     EnterCriticalSection(&g_cs);
     g_reqState = st; g_pending = 1;
     LeaveCriticalSection(&g_cs);
+}
+
+void ExecuteLuaNow(const char* code) {
+    if (!code || !*code) return;
+    __try { ExecuteBuffer(code, "Heroes", 0); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+void RunHeroScriptsTick() {
+    if (!g_warlockEnabled) return;
+    if (g_warlockInitPending) {
+        ExecuteLuaNow(kWarlockAutoKickInitLua);
+        g_warlockInitPending = false;
+    }
+    ExecuteLuaNow(kWarlockAutoKickHotkeyLua);
+    ExecuteLuaNow(kWarlockAutoKickMainLua);
 }
 
 void SetMaxDistanceMemory(float meters) {
@@ -165,6 +411,7 @@ CamUpd_t oCamUpd = nullptr;
 
 void __fastcall hkCamUpd(void* ecx, void* edx, int a1, int a2) {
     DrainPending();
+    RunHeroScriptsTick();
 
     if (unlocked) {
         if (g_qpcFreq.QuadPart == 0) { QueryPerformanceFrequency(&g_qpcFreq); QueryPerformanceCounter(&g_qpcLast); }
@@ -339,6 +586,33 @@ static void DrawTab(LPDRAWITEMSTRUCT d, const char* label, bool active) {
     SelectObject(d->hDC, of);
 }
 
+static void DrawHeroRow(LPDRAWITEMSTRUCT d, const char* label, bool expanded) {
+    RECT rc = d->rcItem;
+    HBRUSH bg = CreateSolidBrush(expanded ? CLR_GOLDDK : CLR_BOX);
+    FillRect(d->hDC, &rc, bg); DeleteObject(bg);
+    HBRUSH fr = CreateSolidBrush(CLR_GOLD); FrameRect(d->hDC, &rc, fr); DeleteObject(fr);
+    SetBkMode(d->hDC, TRANSPARENT);
+    SetTextColor(d->hDC, expanded ? CLR_GOLD : CLR_TEXT);
+    HFONT of = (HFONT)SelectObject(d->hDC, hFontHead);
+    char buf[128];
+    sprintf_s(buf, "%s %s", expanded ? "[-]" : "[+]", label);
+    RECT tr = { rc.left + 12, rc.top, rc.right - 12, rc.bottom };
+    DrawTextA(d->hDC, buf, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(d->hDC, of);
+}
+
+static void UpdateHeroesLayout() {
+    const int heroes = (g_tab == 2) ? SW_SHOW : SW_HIDE;
+    ShowWindow(hLblHeroes, heroes);
+    ShowWindow(hHeroWarlockRow, heroes);
+
+    const int warlockSection = (g_tab == 2 && g_warlockExpanded) ? SW_SHOW : SW_HIDE;
+    ShowWindow(hHeroWarlockCheck, warlockSection);
+    ShowWindow(hHeroWarlockTitle, warlockSection);
+    ShowWindow(hHeroWarlockInfo, warlockSection);
+    ShowWindow(hHeroWarlockHint, warlockSection);
+}
+
 static void ShowTab(int t) {
     g_tab = t;
     int cam = (t == 0) ? SW_SHOW : SW_HIDE;
@@ -351,8 +625,11 @@ static void ShowTab(int t) {
     ShowWindow(hLblEsp, esp);
     for (int i = 0; i < 9; i++) ShowWindow(hEsp[i], esp);
     ShowWindow(hLblEspDist, esp); ShowWindow(hSlEspDist, esp);
+    UpdateHeroesLayout();
     InvalidateRect(hTabCam, NULL, TRUE);
     InvalidateRect(hTabEsp, NULL, TRUE);
+    InvalidateRect(hTabHeroes, NULL, TRUE);
+    if (hHeroWarlockRow) InvalidateRect(hHeroWarlockRow, NULL, TRUE);
 }
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -383,7 +660,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_CTLCOLORSTATIC: {
         HDC dc = (HDC)w; HWND c = (HWND)l; SetBkMode(dc, TRANSPARENT);
         bool gold = (c == hStatus || c == hLblDist || c == hLblSpeed || c == hLblRot ||
-            c == hLblFov || c == hLblEsp || c == hLblEspDist);
+            c == hLblFov || c == hLblEsp || c == hLblEspDist ||
+            c == hLblHeroes || c == hHeroWarlockTitle);
         SetTextColor(dc, gold ? CLR_GOLD : CLR_TEXT);
         return (LRESULT)hbrBack;
     }
@@ -392,6 +670,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         switch (d->CtlID) {
         case 100: DrawTab(d, "Camera", g_tab == 0); return TRUE;
         case 101: DrawTab(d, "ESP", g_tab == 1); return TRUE;
+        case 102: DrawTab(d, "Heroes", g_tab == 2); return TRUE;
         case 1:  DrawCheck(d, "Unlock Camera Distance", g_unlockChecked, true); return TRUE;
         case 2:  DrawCheck(d, "Enable FOV (zoom out)", g_fovEnabled, true); return TRUE;
         case 10: DrawCheck(d, "Enable ESP", g_espEnabled, false); return TRUE;
@@ -403,6 +682,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case 18: DrawCheck(d, "Show Self", g_drawSelf, false); return TRUE;
         case 21: DrawCheck(d, "Show Players", g_espShowPlayers, false); return TRUE;
         case 22: DrawCheck(d, "Show NPCs (Mobs)", g_espShowNpcs, false); return TRUE;
+        case 200: DrawHeroRow(d, "Warlock", g_warlockExpanded); return TRUE;
+        case 201: DrawCheck(d, "Enable AutoKick Spell Lock", g_warlockEnabled, false); return TRUE;
         }
         break;
     }
@@ -429,6 +710,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             UINT id = LOWORD(w);
             if (id == 100) { ShowTab(0); }
             else if (id == 101) { ShowTab(1); }
+            else if (id == 102) { ShowTab(2); }
             else if (id == 1) {
                 g_unlockChecked = !g_unlockChecked;
                 InvalidateRect(hCheck, NULL, TRUE);
@@ -438,6 +720,16 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 g_fovEnabled = !g_fovEnabled;
                 if (g_fovEnabled) g_fovTarget = (float)SliderPos(hSlFov);
                 InvalidateRect(hFovCheck, NULL, TRUE);
+            }
+            else if (id == 200) {
+                g_warlockExpanded = !g_warlockExpanded;
+                UpdateHeroesLayout();
+                InvalidateRect(hHeroWarlockRow, NULL, TRUE);
+            }
+            else if (id == 201) {
+                g_warlockEnabled = !g_warlockEnabled;
+                if (g_warlockEnabled) g_warlockInitPending = true;
+                InvalidateRect(hHeroWarlockCheck, NULL, TRUE);
             }
             else if (id >= 10 && id <= 22) {
                 switch (id) {
@@ -503,8 +795,9 @@ DWORD WINAPI MenuThread(LPVOID) {
     hMenu = CreateWindowExA(WS_EX_TOPMOST, "CamMod", "YamiYami",
         WS_POPUP | WS_CLIPCHILDREN, x, y, W, H, hGame, NULL, hSelf, NULL);
 
-    hTabCam = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 24, 52, 198, 30, hMenu, (HMENU)100, hSelf, NULL);
-    hTabEsp = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 230, 52, 198, 30, hMenu, (HMENU)101, hSelf, NULL);
+    hTabCam = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 24, 52, 128, 30, hMenu, (HMENU)100, hSelf, NULL);
+    hTabEsp = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 162, 52, 128, 30, hMenu, (HMENU)101, hSelf, NULL);
+    hTabHeroes = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 300, 52, 128, 30, hMenu, (HMENU)102, hSelf, NULL);
 
     // Camera tab
     hStatus = mkLabel("Status:  LOCKED (50 yd)", 24, 100, 404, hFontNorm);
@@ -524,6 +817,14 @@ DWORD WINAPI MenuThread(LPVOID) {
     hEsp[8] = mkCheck(22, 24, 262, 190);
     hLblEspDist = mkLabel("ESP distance:   200 yd", 24, 300, 404, hFontHead);
     hSlEspDist = mkSlider(24, 326, 404, 20, 1000, 200);
+
+    // Heroes tab
+    hLblHeroes = mkLabel("Heroes", 24, 100, 404, hFontHead);
+    hHeroWarlockRow = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 24, 134, 404, 28, hMenu, (HMENU)200, hSelf, NULL);
+    hHeroWarlockCheck = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 40, 172, 388, 24, hMenu, (HMENU)201, hSelf, NULL);
+    hHeroWarlockTitle = mkLabel("AutoKick Spell Lock (Felhunter)", 40, 204, 388, hFontHead);
+    hHeroWarlockInfo = mkLabel("Focus -> Target priority. Uses pet Spell Lock.", 40, 232, 388, hFontNorm);
+    hHeroWarlockHint = mkLabel("RShift on/off  |  RAlt kick all  |  RCtrl instant/anti-fake", 40, 258, 388, hFontNorm);
 
     hLblFoot = mkLabel("Menu:  '      Unload:  END      Wheel zooms to 1000 when ON", 24, H - 34, 404, hFontNorm);
 
