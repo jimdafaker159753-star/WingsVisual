@@ -1,12 +1,10 @@
 // ===============================================================
-//  ESP.cpp — WingsVisual. ESP + CHAMS (phase 12: wide diag).
-//  F1..F5 — toggle M2-анкеров
-//  F6     — alpha-blend filter
-//  F7     — DebugView DIP-лог
-//  F8     — world-identity фильтр
-//  F9     — фильтр по типу: OFF → PLAYERS → NPCS → BOTH
-//  [ / ]  — дамп стеков STACK_A / STACK_B при F4-хитах (по 10)
-//  \      — DIAG: VS/VB/shader/local pos (3 F4-хита)
+//  ESP.cpp — WingsVisual high-level entity CHAMS, stage 1.
+//  Exact static targets for the supplied WoW 3.3.5a binary:
+//    CGObject_C::SetModel      0x00743730 (model field +0xB4)
+//    CM2SceneRender::DrawBatch 0x008203B0 (current model +0x60)
+//  Trees/doodads fail closed because only models owned by Type 3/4 objects
+//  are allowed to reach the CHAMS passes. No stack anchors or size guesses.
 // ===============================================================
 #include <windows.h>
 #include <windowsx.h>
@@ -42,17 +40,17 @@ static const UINT YC_INIT = WM_APP + 70, YC_REMOVE = WM_APP + 71;
 static const int YC_COMBO = 4100;
 static const UINT_PTR YC_TIMER = 4077;
 struct YCState {
-    uint32_t* c;
-    const char* title;
-    bool wheel;
-    bool value;
+	uint32_t* c;
+	const char* title;
+	bool wheel;
+	bool value;
 
-    HDC memoryDc;
-    HBITMAP bitmap;
-    HBITMAP oldBitmap;
-    uint32_t* pixels;
-    int bufferWidth;
-    int bufferHeight;
+	HDC memoryDc;
+	HBITMAP bitmap;
+	HBITMAP oldBitmap;
+	uint32_t* pixels;
+	int bufferWidth;
+	int bufferHeight;
 };
 static YCState ysv{}, ysh{};
 static float yc01(float v) {
@@ -107,169 +105,170 @@ static void ycRGB(uint32_t c, float& h, float& s, float& v) {
 	}
 }
 static void ycReleaseBuffer(YCState* state) {
-    if (!state) return;
+	if (!state) return;
 
-    if (state->memoryDc && state->oldBitmap) {
-        SelectObject(state->memoryDc, state->oldBitmap);
-    }
-    if (state->bitmap) {
-        DeleteObject(state->bitmap);
-    }
-    if (state->memoryDc) {
-        DeleteDC(state->memoryDc);
-    }
+	if (state->memoryDc && state->oldBitmap) {
+		SelectObject(state->memoryDc, state->oldBitmap);
+	}
+	if (state->bitmap) {
+		DeleteObject(state->bitmap);
+	}
+	if (state->memoryDc) {
+		DeleteDC(state->memoryDc);
+	}
 
-    state->memoryDc = nullptr;
-    state->bitmap = nullptr;
-    state->oldBitmap = nullptr;
-    state->pixels = nullptr;
-    state->bufferWidth = 0;
-    state->bufferHeight = 0;
+	state->memoryDc = nullptr;
+	state->bitmap = nullptr;
+	state->oldBitmap = nullptr;
+	state->pixels = nullptr;
+	state->bufferWidth = 0;
+	state->bufferHeight = 0;
 }
 
 static bool ycEnsureBuffer(HWND window, YCState* state, int width, int height) {
-    if (!state || width <= 0 || height <= 0) return false;
+	if (!state || width <= 0 || height <= 0) return false;
 
-    if (state->memoryDc && state->bitmap && state->pixels &&
-        state->bufferWidth == width && state->bufferHeight == height) {
-        return true;
-    }
+	if (state->memoryDc && state->bitmap && state->pixels &&
+		state->bufferWidth == width && state->bufferHeight == height) {
+		return true;
+	}
 
-    ycReleaseBuffer(state);
+	ycReleaseBuffer(state);
 
-    HDC windowDc = GetDC(window);
-    if (!windowDc) return false;
+	HDC windowDc = GetDC(window);
+	if (!windowDc) return false;
 
-    BITMAPINFO bitmapInfo{};
-    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bitmapInfo.bmiHeader.biWidth = width;
-    bitmapInfo.bmiHeader.biHeight = -height;
-    bitmapInfo.bmiHeader.biPlanes = 1;
-    bitmapInfo.bmiHeader.biBitCount = 32;
-    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+	BITMAPINFO bitmapInfo{};
+	bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	bitmapInfo.bmiHeader.biWidth = width;
+	bitmapInfo.bmiHeader.biHeight = -height;
+	bitmapInfo.bmiHeader.biPlanes = 1;
+	bitmapInfo.bmiHeader.biBitCount = 32;
+	bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-    void* rawPixels = nullptr;
-    HBITMAP bitmap = CreateDIBSection(
-        windowDc,
-        &bitmapInfo,
-        DIB_RGB_COLORS,
-        &rawPixels,
-        nullptr,
-        0);
+	void* rawPixels = nullptr;
+	HBITMAP bitmap = CreateDIBSection(
+		windowDc,
+		&bitmapInfo,
+		DIB_RGB_COLORS,
+		&rawPixels,
+		nullptr,
+		0);
 
-    HDC memoryDc = CreateCompatibleDC(windowDc);
-    ReleaseDC(window, windowDc);
+	HDC memoryDc = CreateCompatibleDC(windowDc);
+	ReleaseDC(window, windowDc);
 
-    if (!bitmap || !memoryDc || !rawPixels) {
-        if (bitmap) DeleteObject(bitmap);
-        if (memoryDc) DeleteDC(memoryDc);
-        return false;
-    }
+	if (!bitmap || !memoryDc || !rawPixels) {
+		if (bitmap) DeleteObject(bitmap);
+		if (memoryDc) DeleteDC(memoryDc);
+		return false;
+	}
 
-    state->memoryDc = memoryDc;
-    state->bitmap = bitmap;
-    state->oldBitmap = static_cast<HBITMAP>(SelectObject(memoryDc, bitmap));
-    state->pixels = static_cast<uint32_t*>(rawPixels);
-    state->bufferWidth = width;
-    state->bufferHeight = height;
-    return true;
+	state->memoryDc = memoryDc;
+	state->bitmap = bitmap;
+	state->oldBitmap = static_cast<HBITMAP>(SelectObject(memoryDc, bitmap));
+	state->pixels = static_cast<uint32_t*>(rawPixels);
+	state->bufferWidth = width;
+	state->bufferHeight = height;
+	return true;
 }
 
 static void ycPaint(HWND window, YCState* state) {
-    PAINTSTRUCT paint{};
-    HDC windowDc = BeginPaint(window, &paint);
+	PAINTSTRUCT paint{};
+	HDC windowDc = BeginPaint(window, &paint);
 
-    RECT client{};
-    GetClientRect(window, &client);
-    const int width = client.right - client.left;
-    const int height = client.bottom - client.top;
+	RECT client{};
+	GetClientRect(window, &client);
+	const int width = client.right - client.left;
+	const int height = client.bottom - client.top;
 
-    if (!windowDc || !state || !state->c ||
-        !ycEnsureBuffer(window, state, width, height)) {
-        EndPaint(window, &paint);
-        return;
-    }
+	if (!windowDc || !state || !state->c ||
+		!ycEnsureBuffer(window, state, width, height)) {
+		EndPaint(window, &paint);
+		return;
+	}
 
-    const uint32_t background = 0x0012100Cu;
-    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
-    for (size_t i = 0; i < pixelCount; ++i) {
-        state->pixels[i] = background;
-    }
+	const uint32_t background = 0x0012100Cu;
+	const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+	for (size_t i = 0; i < pixelCount; ++i) {
+		state->pixels[i] = background;
+	}
 
-    float hue = 0.0f;
-    float saturation = 0.0f;
-    float brightness = 1.0f;
-    ycRGB(*state->c, hue, saturation, brightness);
+	float hue = 0.0f;
+	float saturation = 0.0f;
+	float brightness = 1.0f;
+	ycRGB(*state->c, hue, saturation, brightness);
 
-    const int centerX = 68;
-    const int centerY = 82;
-    const int radius = 56;
+	const int centerX = 68;
+	const int centerY = 82;
+	const int radius = 56;
 
-    for (int y = 25; y < 140 && y < height; ++y) {
-        for (int x = 10; x < 175 && x < width; ++x) {
-            const float dx = static_cast<float>(x - centerX);
-            const float dy = static_cast<float>(y - centerY);
-            const float distance = sqrtf(dx * dx + dy * dy);
-            uint32_t color = 0;
+	for (int y = 25; y < 140 && y < height; ++y) {
+		for (int x = 10; x < 175 && x < width; ++x) {
+			const float dx = static_cast<float>(x - centerX);
+			const float dy = static_cast<float>(y - centerY);
+			const float distance = sqrtf(dx * dx + dy * dy);
+			uint32_t color = 0;
 
-            if (distance <= static_cast<float>(radius)) {
-                float pixelHue = atan2f(dy, dx) / 6.2831853f;
-                if (pixelHue < 0.0f) pixelHue += 1.0f;
-                color = ycHSV(pixelHue, distance / radius, brightness);
-            } else if (x >= 145 && x <= 163) {
-                const float pixelBrightness =
-                    1.0f - static_cast<float>(y - 25) / 115.0f;
-                color = ycHSV(hue, saturation, pixelBrightness);
-            }
+			if (distance <= static_cast<float>(radius)) {
+				float pixelHue = atan2f(dy, dx) / 6.2831853f;
+				if (pixelHue < 0.0f) pixelHue += 1.0f;
+				color = ycHSV(pixelHue, distance / radius, brightness);
+			}
+			else if (x >= 145 && x <= 163) {
+				const float pixelBrightness =
+					1.0f - static_cast<float>(y - 25) / 115.0f;
+				color = ycHSV(hue, saturation, pixelBrightness);
+			}
 
-            if (color != 0) {
-                state->pixels[static_cast<size_t>(y) * width + x] =
-                    color & 0x00FFFFFFu;
-            }
-        }
-    }
+			if (color != 0) {
+				state->pixels[static_cast<size_t>(y) * width + x] =
+					color & 0x00FFFFFFu;
+			}
+		}
+	}
 
-    HDC dc = state->memoryDc;
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(255, 209, 10));
+	HDC dc = state->memoryDc;
+	SetBkMode(dc, TRANSPARENT);
+	SetTextColor(dc, RGB(255, 209, 10));
 
-    HFONT selectedFont = hFontHead
-        ? hFontHead
-        : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    HFONT oldFont = static_cast<HFONT>(SelectObject(dc, selectedFont));
+	HFONT selectedFont = hFontHead
+		? hFontHead
+		: static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+	HFONT oldFont = static_cast<HFONT>(SelectObject(dc, selectedFont));
 
-    TextOutA(dc, 4, 3, state->title, static_cast<int>(strlen(state->title)));
+	TextOutA(dc, 4, 3, state->title, static_cast<int>(strlen(state->title)));
 
-    const float angle = hue * 6.2831853f;
-    const int markerX = centerX +
-        static_cast<int>(cosf(angle) * saturation * radius);
-    const int markerY = centerY +
-        static_cast<int>(sinf(angle) * saturation * radius);
+	const float angle = hue * 6.2831853f;
+	const int markerX = centerX +
+		static_cast<int>(cosf(angle) * saturation * radius);
+	const int markerY = centerY +
+		static_cast<int>(sinf(angle) * saturation * radius);
 
-    HPEN markerPen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-    HPEN oldPen = static_cast<HPEN>(SelectObject(dc, markerPen));
-    HBRUSH oldBrush = static_cast<HBRUSH>(
-        SelectObject(dc, GetStockObject(NULL_BRUSH)));
+	HPEN markerPen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+	HPEN oldPen = static_cast<HPEN>(SelectObject(dc, markerPen));
+	HBRUSH oldBrush = static_cast<HBRUSH>(
+		SelectObject(dc, GetStockObject(NULL_BRUSH)));
 
-    Ellipse(dc, markerX - 5, markerY - 5, markerX + 6, markerY + 6);
+	Ellipse(dc, markerX - 5, markerY - 5, markerX + 6, markerY + 6);
 
-    const int brightnessY = 25 +
-        static_cast<int>((1.0f - brightness) * 115.0f);
-    MoveToEx(dc, 142, brightnessY, nullptr);
-    LineTo(dc, 167, brightnessY);
+	const int brightnessY = 25 +
+		static_cast<int>((1.0f - brightness) * 115.0f);
+	MoveToEx(dc, 142, brightnessY, nullptr);
+	LineTo(dc, 167, brightnessY);
 
-    char text[16];
-    sprintf_s(text, "#%06X", *state->c & 0x00FFFFFFu);
-    SetTextColor(dc, RGB(240, 225, 180));
-    TextOutA(dc, 10, 148, text, static_cast<int>(strlen(text)));
+	char text[16];
+	sprintf_s(text, "#%06X", *state->c & 0x00FFFFFFu);
+	SetTextColor(dc, RGB(240, 225, 180));
+	TextOutA(dc, 10, 148, text, static_cast<int>(strlen(text)));
 
-    BitBlt(windowDc, 0, 0, width, height, dc, 0, 0, SRCCOPY);
+	BitBlt(windowDc, 0, 0, width, height, dc, 0, 0, SRCCOPY);
 
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldFont);
-    DeleteObject(markerPen);
-    EndPaint(window, &paint);
+	SelectObject(dc, oldBrush);
+	SelectObject(dc, oldPen);
+	SelectObject(dc, oldFont);
+	DeleteObject(markerPen);
+	EndPaint(window, &paint);
 }
 
 static void ycMouse(HWND w, YCState* st, int x, int y) {
@@ -292,11 +291,11 @@ static LRESULT CALLBACK ycWheel(HWND w, UINT m, WPARAM a, LPARAM l) {
 		return TRUE;
 	}
 	if (m == WM_NCDESTROY) {
-    ycReleaseBuffer(st);
-    SetWindowLongPtrA(w, GWLP_USERDATA, 0);
-    return DefWindowProcA(w, m, a, l);
-}
-if (m == WM_ERASEBKGND) return 1;
+		ycReleaseBuffer(st);
+		SetWindowLongPtrA(w, GWLP_USERDATA, 0);
+		return DefWindowProcA(w, m, a, l);
+	}
+	if (m == WM_ERASEBKGND) return 1;
 	if (m == WM_PAINT) {
 		ycPaint(w, st);
 		return 0;
@@ -417,44 +416,19 @@ static void RemoveYamiPanel() {
 	if (hMenu && ycOld)SendMessageA(hMenu, YC_REMOVE, 0, 0);
 }
 
-struct M2Anchor {
-	uintptr_t addr;
-	bool      enabled;
-	unsigned  hits;
-};
-static M2Anchor g_m2Anchors[5] = {
-	{ 0x00872C05, true,  0 },   // F1
-	{ 0x0097A663, true,  0 },   // F2
-	{ 0x00823D24, false, 0 },   // F3
-	{ 0x00823A88, true,  0 },   // F4 — main
-	{ 0x0068FAFC, false, 0 },   // F5
-};
-static const int g_m2AnchorCount = (int)(sizeof(g_m2Anchors) / sizeof(g_m2Anchors[0]));
+static constexpr uintptr_t DRAW_BATCH_ADDR = 0x008203B0;
+static constexpr uintptr_t SCENE_RENDER_CUR_MODEL = 0x60;
 
-static bool g_skipAlphaBlend = true;
-static bool g_filterWorldIdentity = false;   // F8
+// Statically derived from CM2Model attachment traversal in the supplied binary.
+// 0x82506F walks child models via [model + 0x58] then [child + 0x60].
+static constexpr uintptr_t MODEL_ATTACH_CHILD_LIST = 0x58;
+static constexpr uintptr_t MODEL_ATTACH_NEXT_SIBLING = 0x60;
 
-enum ChamsFilterMode { FM_OFF = 0, FM_PLAYERS = 1, FM_NPCS = 2, FM_BOTH = 3 };
-static int g_chamsFilterMode = FM_OFF;        // F9
-static const char* FilterName(int m) {
-	switch (m) {
-	case FM_OFF:     return "OFF";
-	case FM_PLAYERS: return "PLAYERS";
-	case FM_NPCS:    return "NPCS";
-	case FM_BOTH:    return "BOTH";
-	}
-	return "?";
-}
-
-static int g_captureA = 0;
-static int g_captureB = 0;
-static int g_captureDiag = 0;
-static const int kCaptureBatch = 10;
-static const int kCaptureDiagBatch = 3;
-
-static int g_playersCached = 0;
-
-static const DWORD kChamsVisibleColor = 0xFF40B0FF;
+static constexpr BYTE CHAMS_HIDDEN_ALPHA = 255;
+static constexpr BYTE CHAMS_VISIBLE_ALPHA = 210;
+static constexpr int CHAMS_VISIBLE_PASSES = 2;
+static constexpr UINT CHAMS_MIN_VERTICES = 20;
+static constexpr UINT CHAMS_MIN_PRIMITIVES = 6;
 
 static const char* g_targetNames[] = { "%%NOTARGET%%" };
 static const int g_targetCount = (int)(sizeof(g_targetNames) / sizeof(g_targetNames[0]));
@@ -470,217 +444,163 @@ typedef HRESULT(WINAPI* EndScene_t)(IDirect3DDevice9*);
 typedef HRESULT(WINAPI* Reset_t)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
 typedef HRESULT(WINAPI* SetTransform_t)(IDirect3DDevice9*, D3DTRANSFORMSTATETYPE, const D3DMATRIX*);
 typedef HRESULT(WINAPI* DIP_t)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
+typedef void(__fastcall* DrawBatch_t)(void* ecx, void* edx);
 
 static EndScene_t oEndScene = nullptr;
 static Reset_t oReset = nullptr;
 static SetTransform_t oSetTransform = nullptr;
 static DIP_t oDIP = nullptr;
+static DrawBatch_t oDrawBatch = nullptr;
 
 static void* g_pEndScene = nullptr;
 static void* g_pReset = nullptr;
 static void* g_pSetTransform = nullptr;
 static void* g_pDIP = nullptr;
+static void* g_pDrawBatch = reinterpret_cast<void*>(DRAW_BATCH_ADDR);
 
 static HWND g_hGameWnd = nullptr;
 static std::atomic<bool> g_imguiReady{ false };
 static std::atomic<bool> g_unloading{ false };
 static std::atomic<bool> g_inImGui{ false };
 
-static uintptr_t g_wowBase = 0;
-static uintptr_t g_wowEnd = 0;
-static void EnsureWowRange() {
-	if (g_wowBase) return;
-	HMODULE h = GetModuleHandleA(NULL);
-	if (!h) return;
-	IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)h;
-	if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
-	IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)((BYTE*)h + dos->e_lfanew);
-	if (nt->Signature != IMAGE_NT_SIGNATURE) return;
-	g_wowBase = (uintptr_t)h;
-	g_wowEnd = g_wowBase + nt->OptionalHeader.SizeOfImage;
-}
-
-static int StackMatchAnchor() {
-	uintptr_t curEsp = 0;
-	__asm { mov curEsp, esp }
-	uintptr_t* stack = (uintptr_t*)curEsp;
-	if (!stack) return -1;
-	__try {
-		for (int i = 0; i < 400; i++) {
-			uintptr_t v = stack[i];
-			if (v <= g_wowBase + 0x1000 || v >= g_wowEnd) continue;
-			for (int k = 0; k < g_m2AnchorCount; k++) {
-				if (g_m2Anchors[k].enabled && v == g_m2Anchors[k].addr) return k;
-			}
-		}
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER) {}
-	return -1;
-}
-
-static void DumpFullStack(char tag) {
-	uintptr_t curEsp = 0;
-	__asm { mov curEsp, esp }
-	uintptr_t* stack = (uintptr_t*)curEsp;
-	if (!stack) return;
-	char buf[640];
-	int used = _snprintf_s(buf, _TRUNCATE, "[STACK_%c]", tag);
-	__try {
-		int printed = 0;
-		for (int i = 0; i < 400 && printed < 40 && used < 600; i++) {
-			uintptr_t v = stack[i];
-			if (v <= g_wowBase + 0x1000 || v >= g_wowEnd) continue;
-			int n = _snprintf_s(buf + used, sizeof(buf) - used, _TRUNCATE, " 0x%08X", (unsigned)v);
-			if (n <= 0) break;
-			used += n; printed++;
-		}
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER) {}
-	int rem = (int)sizeof(buf) - used;
-	if (rem > 2) _snprintf_s(buf + used, rem, _TRUNCATE, "\n");
-	else { buf[sizeof(buf) - 2] = '\n'; buf[sizeof(buf) - 1] = 0; }
-	OutputDebugStringA(buf);
-}
-
-// Расширенный DIAG-дамп: пытаемся найти где живёт per-object позиция.
-static void DumpDiagWide(IDirect3DDevice9* dev, int hitIdx,
-	D3DPRIMITIVETYPE type, INT baseVI, UINT minVI,
-	UINT numV, UINT startIdx, UINT primCount)
-{
-	char buf[640];
-
-	// 1) контекст: локальный игрок + DIP-параметры
-	_snprintf_s(buf, _TRUNCATE,
-		"[DIAG #%d] local=(%.1f,%.1f,%.1f) valid=%d  type=%d baseVI=%d minVI=%u numV=%u startIdx=%u primCount=%u\n",
-		hitIdx, g_localX, g_localY, g_localZ, g_localValid ? 1 : 0,
-		(int)type, baseVI, minVI, numV, startIdx, primCount);
-	OutputDebugStringA(buf);
-
-	// 2) shader / FVF / stride — определит FF vs programmable
-	IDirect3DVertexShader9* vs = nullptr;
-	dev->GetVertexShader(&vs);
-	DWORD fvf = 0;
-	dev->GetFVF(&fvf);
-	UINT stride = 0, vbOffset = 0;
-	IDirect3DVertexBuffer9* vb = nullptr;
-	HRESULT hrStream = dev->GetStreamSource(0, &vb, &vbOffset, &stride);
-	_snprintf_s(buf, _TRUNCATE,
-		"[DIAG #%d] shader=%p FVF=0x%08X stream_hr=0x%08X vb=%p offset=%u stride=%u\n",
-		hitIdx, (void*)vs, fvf, (unsigned)hrStream, (void*)vb, vbOffset, stride);
-	OutputDebugStringA(buf);
-
-	// 3) WORLDMATRIX(0..2) + VIEW — для полноты
-	for (int wi = 0; wi < 3; wi++) {
-		D3DMATRIX m; ZeroMemory(&m, sizeof(m));
-		dev->GetTransform((D3DTRANSFORMSTATETYPE)(256 + wi), &m);
-		_snprintf_s(buf, _TRUNCATE,
-			"[DIAG #%d] WM(%d) t=(%.2f,%.2f,%.2f)\n",
-			hitIdx, wi, m._41, m._42, m._43);
-		OutputDebugStringA(buf);
-	}
-	{
-		D3DMATRIX m; ZeroMemory(&m, sizeof(m));
-		dev->GetTransform(D3DTS_VIEW, &m);
-		_snprintf_s(buf, _TRUNCATE,
-			"[DIAG #%d] VIEW t=(%.2f,%.2f,%.2f) inv?=(%.2f,%.2f,%.2f)\n",
-			hitIdx, m._41, m._42, m._43,
-			-(m._11 * m._41 + m._12 * m._42 + m._13 * m._43),
-			-(m._21 * m._41 + m._22 * m._42 + m._23 * m._43),
-			-(m._31 * m._41 + m._32 * m._42 + m._33 * m._43));
-		OutputDebugStringA(buf);
-	}
-
-	// 4) VS constants c0..c31 (по 2 регистра на строку = 16 строк)
-	float vsc[4 * 32]; ZeroMemory(vsc, sizeof(vsc));
-	HRESULT hrVS = dev->GetVertexShaderConstantF(0, vsc, 32);
-	for (int r = 0; r < 32; r += 2) {
-		_snprintf_s(buf, _TRUNCATE,
-			"[DIAG #%d] VS_C%02d=(%.2f,%.2f,%.2f,%.2f)  VS_C%02d=(%.2f,%.2f,%.2f,%.2f)%s\n",
-			hitIdx, r,
-			vsc[r * 4 + 0], vsc[r * 4 + 1], vsc[r * 4 + 2], vsc[r * 4 + 3],
-			r + 1,
-			vsc[(r + 1) * 4 + 0], vsc[(r + 1) * 4 + 1], vsc[(r + 1) * 4 + 2], vsc[(r + 1) * 4 + 3],
-			r == 0 ? "" : "");
-		OutputDebugStringA(buf);
-	}
-	_snprintf_s(buf, _TRUNCATE, "[DIAG #%d] VS_constants hr=0x%08X\n", hitIdx, (unsigned)hrVS);
-	OutputDebugStringA(buf);
-
-	// 5) Первая вершина из VB через Lock — проверка world-space vs local-space
-	if (vb && stride >= 12 && stride <= 128) {
-		void* pData = nullptr;
-		UINT lockOffset = vbOffset + minVI * stride;
-		UINT lockSize = stride * 3; // 3 вершины для контекста
-		HRESULT hrLock = vb->Lock(lockOffset, lockSize, &pData, D3DLOCK_READONLY);
-		if (SUCCEEDED(hrLock) && pData) {
-			__try {
-				float* v0 = (float*)pData;
-				float* v1 = (float*)((BYTE*)pData + stride);
-				float* v2 = (float*)((BYTE*)pData + stride * 2);
-				_snprintf_s(buf, _TRUNCATE,
-					"[DIAG #%d] V0=(%.2f,%.2f,%.2f) V1=(%.2f,%.2f,%.2f) V2=(%.2f,%.2f,%.2f)\n",
-					hitIdx,
-					v0[0], v0[1], v0[2],
-					v1[0], v1[1], v1[2],
-					v2[0], v2[1], v2[2]);
-				OutputDebugStringA(buf);
-			}
-			__except (EXCEPTION_EXECUTE_HANDLER) {
-				OutputDebugStringA("[DIAG] VB read fault\n");
-			}
-			vb->Unlock();
-		}
-		else {
-			_snprintf_s(buf, _TRUNCATE, "[DIAG #%d] VB lock failed hr=0x%08X\n", hitIdx, (unsigned)hrLock);
-			OutputDebugStringA(buf);
-		}
-	}
-
-	if (vs) vs->Release();
-	if (vb) vb->Release();
-
-	OutputDebugStringA("[DIAG] ---\n");
-}
-
-struct DipLogKey { UINT stride; UINT numV; UINT primCount; };
-static DipLogKey g_logTab[512];
-static int  g_logN = 0;
-static bool g_logInit = false;
-static void LogDipParams(UINT stride, UINT numV, UINT primCount) {
-	if (!g_chamsDebug) return;
-	if (!g_logInit) { FillMemory(g_logTab, sizeof(g_logTab), 0); g_logN = 0; g_logInit = true; }
-	for (int i = 0; i < g_logN; i++)
-		if (g_logTab[i].stride == stride && g_logTab[i].numV == numV && g_logTab[i].primCount == primCount) return;
-	if (g_logN >= 512) return;
-	g_logTab[g_logN++] = { stride, numV, primCount };
-	char buf[128];
-	_snprintf_s(buf, _TRUNCATE, "[CHAMS-DIP] stride=%u numV=%u primCount=%u\n", stride, numV, primCount);
-	OutputDebugStringA(buf);
-}
-
 static float g_boxRadius = 0.55f;
-static unsigned g_paintedFrame = 0;
-static unsigned g_paintedLast = 0;
-static unsigned g_hitsLast[5] = { 0 };
+// Exact model ownership snapshot rebuilt from ObjectManager once per frame.
+// Unknown models fail closed and never receive CHAMS.
+struct ModelOwnerEntry {
+	uintptr_t model;
+	uintptr_t rootModel;
+	uintptr_t objectBase;
+	uint64_t guid;
+	uint8_t type;
+};
 
-static int FindNearestUnit(float wx, float wy, float wz, float radius,
-	int filterMode, float& outDist)
-{
-	float bestD2 = radius * radius;
-	int bestIdx = -1;
-	int n = g_playersCached;
-	if (n <= 0) { outDist = -1.0f; return -1; }
-	for (int i = 0; i < n; i++) {
-		const PlayerInfo& p = g_players[i];
-		bool isPlayer = (p.type == OT_PLAYER);
-		if (filterMode == FM_PLAYERS && !isPlayer) continue;
-		if (filterMode == FM_NPCS && isPlayer) continue;
-		float dx = p.x - wx, dy = p.y - wy, dz = p.z - wz;
-		float d2 = dx * dx + dy * dy + dz * dz;
-		if (d2 < bestD2) { bestD2 = d2; bestIdx = i; }
+constexpr int MAX_MODEL_OWNERS = 1024;
+static ModelOwnerEntry g_modelOwners[MAX_MODEL_OWNERS] = {};
+static int g_modelOwnerCount = 0;
+
+struct ActiveRenderOwner {
+	uintptr_t model;
+	uintptr_t objectBase;
+	uint64_t guid;
+	uint8_t type;
+	bool valid;
+};
+
+static thread_local ActiveRenderOwner g_activeRenderOwner = {};
+
+static bool InsertModelOwner(uintptr_t renderModel, uintptr_t rootModel, const PlayerInfo& entity) {
+	if (!renderModel || !rootModel || !entity.objectBase)
+		return false;
+
+	for (int i = 0; i < g_modelOwnerCount; ++i) {
+		if (g_modelOwners[i].model == renderModel)
+			return true;
 	}
-	outDist = (bestIdx >= 0) ? sqrtf(bestD2) : -1.0f;
-	return bestIdx;
+
+	if (g_modelOwnerCount >= MAX_MODEL_OWNERS)
+		return false;
+
+	ModelOwnerEntry& out = g_modelOwners[g_modelOwnerCount++];
+	out.model = renderModel;
+	out.rootModel = rootModel;
+	out.objectBase = entity.objectBase;
+	out.guid = entity.guid;
+	out.type = entity.type;
+	return true;
+}
+
+static void AddModelOwnerTree(const PlayerInfo& entity, uintptr_t rootModel, uintptr_t renderModel, int depth) {
+	if (!renderModel || !rootModel)
+		return;
+	if (depth > 8)
+		return;
+	if (!InsertModelOwner(renderModel, rootModel, entity))
+		return;
+
+	uintptr_t child = 0;
+	if (!SafeRead(renderModel + MODEL_ATTACH_CHILD_LIST, child))
+		return;
+
+	int siblingBudget = 64;
+	while (child && siblingBudget-- > 0 && g_modelOwnerCount < MAX_MODEL_OWNERS) {
+		AddModelOwnerTree(entity, rootModel, child, depth + 1);
+
+		uintptr_t next = 0;
+		if (!SafeRead(child + MODEL_ATTACH_NEXT_SIBLING, next))
+			break;
+		child = next;
+	}
+}
+
+static void RebuildModelOwnerMap() {
+	g_modelOwnerCount = 0;
+
+	for (int i = 0; i < g_playerCount && g_modelOwnerCount < MAX_MODEL_OWNERS; ++i) {
+		const PlayerInfo& entity = g_players[i];
+		if (!entity.model || !entity.objectBase)
+			continue;
+		if (entity.type != OT_UNIT && entity.type != OT_PLAYER)
+			continue;
+
+		AddModelOwnerTree(entity, entity.model, entity.model, 0);
+	}
+}
+
+static bool ValidateModelOwner(const ModelOwnerEntry& owner) {
+	uint8_t type = OT_NONE;
+	uint64_t guid = 0;
+	uintptr_t model = 0;
+
+	if (!SafeRead(owner.objectBase + Off::OBJ_TYPE, type))
+		return false;
+	if (!SafeRead(owner.objectBase + Off::OBJ_GUID, guid))
+		return false;
+	if (!SafeRead(owner.objectBase + Off::MODEL_PTR, model))
+		return false;
+
+	return type == owner.type &&
+		guid == owner.guid &&
+		model == owner.rootModel &&
+		(type == OT_UNIT || type == OT_PLAYER);
+}
+
+static bool FindModelOwner(uintptr_t model, ActiveRenderOwner& out) {
+	if (!model)
+		return false;
+
+	for (int i = 0; i < g_modelOwnerCount; ++i) {
+		const ModelOwnerEntry& candidate = g_modelOwners[i];
+		if (candidate.model != model)
+			continue;
+		if (!ValidateModelOwner(candidate))
+			return false;
+
+		out.model = model;
+		out.objectBase = candidate.objectBase;
+		out.guid = candidate.guid;
+		out.type = candidate.type;
+		out.valid = true;
+		return true;
+	}
+
+	return false;
+}
+
+static void __fastcall hkDrawBatch(void* ecx, void* edx) {
+	ActiveRenderOwner previous = g_activeRenderOwner;
+	ActiveRenderOwner current = {};
+
+	uintptr_t model = 0;
+	if (ecx)
+		SafeRead(reinterpret_cast<uintptr_t>(ecx) + SCENE_RENDER_CUR_MODEL, model);
+
+	FindModelOwner(model, current);
+	g_activeRenderOwner = current;
+
+	if (oDrawBatch)
+		oDrawBatch(ecx, edx);
+
+	g_activeRenderOwner = previous;
 }
 
 static bool GetD3D9VTable(void** outEndScene, void** outReset, void** outSetTransform, void** outDIP) {
@@ -809,71 +729,20 @@ static void SetSoftOverlayState(IDirect3DDevice9* dev, D3DCOLOR color, D3DCMPFUN
 static HRESULT WINAPI hkDIP(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT baseVI,
 	UINT minVI, UINT numV, UINT startIdx, UINT primCount)
 {
-	EnsureWowRange();
-
 	if (!oDIP) return D3D_OK;
 	if (g_inImGui.load() || g_unloading.load())
 		return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
 
-	if (g_chamsDebug) {
-		UINT stride = 0, vbOffset = 0;
-		IDirect3DVertexBuffer9* vb = nullptr;
-		__try {
-			if (dev->GetStreamSource(0, &vb, &vbOffset, &stride) != D3D_OK) vb = nullptr;
-		}
-		__except (EXCEPTION_EXECUTE_HANDLER) { vb = nullptr; }
-		if (vb) vb->Release();
-		LogDipParams(stride, numV, primCount);
-	}
-
-	if (!g_chamsEnabled)
+	if (!g_chamsEnabled || !g_activeRenderOwner.valid)
 		return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
 
-	if (numV < 20 || primCount < 6)
+	// Exact category gate. Resources and unknown models always fail closed.
+	if (g_espCategory == ESP_CATEGORY_NPCS && g_activeRenderOwner.type != OT_UNIT)
 		return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
-
-	if (g_skipAlphaBlend) {
-		DWORD ab = 0;
-		dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &ab);
-		if (ab) return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
-	}
-
-	int idx = StackMatchAnchor();
-	if (idx < 0)
+	if (g_espCategory == ESP_CATEGORY_PLAYERS && g_activeRenderOwner.type != OT_PLAYER)
 		return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
-
-	D3DMATRIX wm;
-	bool wmOk = (dev->GetTransform(D3DTS_WORLD, &wm) == D3D_OK);
-	float wx = 0, wy = 0, wz = 0;
-	bool wmIsIdentity = true;
-	if (wmOk) {
-		wx = wm._41; wy = wm._42; wz = wm._43;
-		float dDiag = fabsf(wm._11 - 1.0f) + fabsf(wm._22 - 1.0f) + fabsf(wm._33 - 1.0f);
-		float dTr = fabsf(wx) + fabsf(wy) + fabsf(wz);
-		wmIsIdentity = (dDiag < 0.02f && dTr < 0.5f);
-	}
-
-	if (g_filterWorldIdentity) {
-		if (!wmIsIdentity) return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
-	}
-
-	// '\' — DIAG-дамп только когда ObjectManager жив
-	if (idx == 3 && g_captureDiag > 0 && g_localValid) {
-		int hitNum = kCaptureDiagBatch - g_captureDiag + 1;
-		g_captureDiag--;
-		DumpDiagWide(dev, hitNum, type, baseVI, minVI, numV, startIdx, primCount);
-	}
-
-	if (g_chamsFilterMode != FM_OFF) {
-		if (!wmOk || wmIsIdentity) {
-			return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
-		}
-		float d = -1.0f;
-		int ni = FindNearestUnit(wx, wy, wz, 3.5f, g_chamsFilterMode, d);
-		if (ni < 0) {
-			return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
-		}
-	}
+	if (g_espCategory == ESP_CATEGORY_RESOURCES)
+		return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
 
 	IDirect3DBaseTexture9* tex = nullptr;
 	bool hasTex = (dev->GetTexture(0, &tex) == D3D_OK && tex);
@@ -881,107 +750,84 @@ static HRESULT WINAPI hkDIP(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT ba
 	if (!hasTex)
 		return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
 
-	if (idx == 3) {
-		if (g_captureA > 0) { g_captureA--; DumpFullStack('A'); }
-		else if (g_captureB > 0) { g_captureB--; DumpFullStack('B'); }
-	}
+	// Spell billboards / cast glints commonly arrive as tiny quad-like draws.
+	// Skip CHAMS on those very small passes while preserving full body meshes.
+	if (numV < CHAMS_MIN_VERTICES || primCount < CHAMS_MIN_PRIMITIVES)
+		return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
 
-	// В диагностике у M2 прозрачные материалы имели VS c28.w = 0.55.
-	// Не накладываем CHAMS на волосы, частицы и другие alpha-материалы.
+	// Temporary cast glints / spell visuals often ride the same owner model tree,
+	// but the broad blended-pass filter from stage 3 also removed valid body passes
+	// behind thick objects. Keep only a narrow additive-pass rejection here.
+	DWORD alphaBlendEnable = FALSE;
+	DWORD srcBlend = D3DBLEND_ONE;
+	DWORD dstBlend = D3DBLEND_ZERO;
+	dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &alphaBlendEnable);
+	dev->GetRenderState(D3DRS_SRCBLEND, &srcBlend);
+	dev->GetRenderState(D3DRS_DESTBLEND, &dstBlend);
+
+	const bool additivePass =
+		(alphaBlendEnable != FALSE) &&
+		(srcBlend == D3DBLEND_ONE || srcBlend == D3DBLEND_SRCALPHA || srcBlend == D3DBLEND_BOTHSRCALPHA) &&
+		(dstBlend == D3DBLEND_ONE || dstBlend == D3DBLEND_SRCCOLOR || dstBlend == D3DBLEND_INVSRCCOLOR);
+	if (additivePass)
+		return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
+
 	float materialC28[4] = { 0, 0, 0, 0 };
 	if (SUCCEEDED(dev->GetVertexShaderConstantF(28, materialC28, 1))) {
 		const float materialAlpha = materialC28[3];
 		if (materialAlpha > 0.01f && materialAlpha < 0.90f)
 			return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
 	}
-    g_m2Anchors[idx].hits++;
-    g_paintedFrame++;
 
-    HRESULT baseResult = D3D_OK;
-    bool originalDrawn = false;
-    ChamsState saved{};
-    bool stateSaved = false;
+	HRESULT baseResult = D3D_OK;
+	bool originalDrawn = false;
+	ChamsState saved{};
+	bool stateSaved = false;
 
-    __try {
-        // Hidden pass must run before the original model writes depth.
-        SaveState(dev, saved);
-        stateSaved = true;
+	__try {
+		SaveState(dev, saved);
+		stateSaved = true;
 
-        SetSoftOverlayState(
-            dev,
-            ColorWithAlpha(g_chamsHiddenByCategory[g_espCategory], 160),
-            // Stable hidden pass: ignore the current depth-buffer contents.
-            D3DCMP_ALWAYS);
+		SetSoftOverlayState(
+			dev,
+			ColorWithAlpha(g_chamsHiddenByCategory[g_espCategory], CHAMS_HIDDEN_ALPHA),
+			D3DCMP_ALWAYS);
 
-        oDIP(
-            dev,
-            type,
-            baseVI,
-            minVI,
-            numV,
-            startIdx,
-            primCount);
+		oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
 
-        RestoreState(dev, saved);
-        stateSaved = false;
+		RestoreState(dev, saved);
+		stateSaved = false;
 
-        // Draw the normal game model with its original states and shaders.
-        baseResult = oDIP(
-            dev,
-            type,
-            baseVI,
-            minVI,
-            numV,
-            startIdx,
-            primCount);
+		baseResult = oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
+		originalDrawn = true;
+		if (FAILED(baseResult))
+			return baseResult;
 
-        originalDrawn = true;
-        if (FAILED(baseResult)) {
-            return baseResult;
-        }
+		SaveState(dev, saved);
+		stateSaved = true;
 
-        // Add a soft tint only to the visible part.
-        SaveState(dev, saved);
-        stateSaved = true;
+		SetSoftOverlayState(
+			dev,
+			ColorWithAlpha(g_chamsVisibleByCategory[g_espCategory], CHAMS_VISIBLE_ALPHA),
+			D3DCMP_LESSEQUAL);
 
-        SetSoftOverlayState(
-            dev,
-            ColorWithAlpha(g_chamsVisibleByCategory[g_espCategory], 54),
-            D3DCMP_LESSEQUAL);
+		for (int pass = 0; pass < CHAMS_VISIBLE_PASSES; ++pass)
+			oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
 
-        oDIP(
-            dev,
-            type,
-            baseVI,
-            minVI,
-            numV,
-            startIdx,
-            primCount);
+		RestoreState(dev, saved);
+		stateSaved = false;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		if (stateSaved)
+			RestoreState(dev, saved);
 
-        RestoreState(dev, saved);
-        stateSaved = false;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        if (stateSaved) {
-            RestoreState(dev, saved);
-            stateSaved = false;
-        }
+		if (!originalDrawn)
+			return oDIP(dev, type, baseVI, minVI, numV, startIdx, primCount);
 
-        if (!originalDrawn) {
-            return oDIP(
-                dev,
-                type,
-                baseVI,
-                minVI,
-                numV,
-                startIdx,
-                primCount);
-        }
+		return baseResult;
+	}
 
-        return baseResult;
-    }
-
-    return baseResult;
+	return baseResult;
 }
 
 static void AppendGameObjectsToEsp() {
@@ -1114,105 +960,17 @@ static void RenderOverlay(IDirect3DDevice9* dev) {
 	D3DVIEWPORT9 vpq{}; dev->GetViewport(&vpq);
 	const int w = (int)vpq.Width, h = (int)vpq.Height;
 
-	{
-		static bool prev[5] = { false };
-		int vk[5] = { VK_F1, VK_F2, VK_F3, VK_F4, VK_F5 };
-		for (int i = 0; i < 5; i++) {
-			bool k = (GetAsyncKeyState(vk[i]) & 0x8000) != 0;
-			if (k && !prev[i]) g_m2Anchors[i].enabled = !g_m2Anchors[i].enabled;
-			prev[i] = k;
-		}
-	}
-	{
-		static bool prev = false;
-		bool k = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
-		if (k && !prev) g_skipAlphaBlend = !g_skipAlphaBlend;
-		prev = k;
-	}
-	{
-		static bool prev = false;
-		bool k = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
-		if (k && !prev) {
-			g_chamsDebug = !g_chamsDebug;
-			if (g_chamsDebug) { g_logN = 0; g_logInit = false; }
-			OutputDebugStringA(g_chamsDebug ? "[CHAMS-DIP] LOG ON\n" : "[CHAMS-DIP] LOG OFF\n");
-		}
-		prev = k;
-	}
-	{
-		static bool prev = false;
-		bool k = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
-		if (k && !prev) {
-			g_filterWorldIdentity = !g_filterWorldIdentity;
-			OutputDebugStringA(g_filterWorldIdentity ? "[CHAMS] worldId ON\n" : "[CHAMS] worldId OFF\n");
-		}
-		prev = k;
-	}
-	{
-		static bool prev = false;
-		bool k = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
-		if (k && !prev) {
-			g_chamsFilterMode = (g_chamsFilterMode + 1) & 3;
-			char b[64];
-			_snprintf_s(b, _TRUNCATE, "[CHAMS] filter=%s\n", FilterName(g_chamsFilterMode));
-			OutputDebugStringA(b);
-		}
-		prev = k;
-	}
-	{
-		static bool prevA = false, prevB = false, prevW = false;
-		bool kA = (GetAsyncKeyState(VK_OEM_4) & 0x8000) != 0;   // '['
-		bool kB = (GetAsyncKeyState(VK_OEM_6) & 0x8000) != 0;   // ']'
-		bool kW = (GetAsyncKeyState(VK_OEM_5) & 0x8000) != 0;   // '\'
-		if (kA && !prevA) { g_captureA = kCaptureBatch; OutputDebugStringA("[STACK_A] START 10\n"); }
-		if (kB && !prevB) { g_captureB = kCaptureBatch; OutputDebugStringA("[STACK_B] START 10\n"); }
-		if (kW && !prevW) {
-			if (g_localValid) {
-				g_captureDiag = kCaptureDiagBatch;
-				char b[128];
-				_snprintf_s(b, _TRUNCATE, "[DIAG] START %d F4-hits (local=%.1f,%.1f,%.1f)\n",
-					kCaptureDiagBatch, g_localX, g_localY, g_localZ);
-				OutputDebugStringA(b);
-			}
-			else {
-				OutputDebugStringA("[DIAG] SKIP — ObjectManager not valid, зайди в игру персонажем\n");
-			}
-		}
-		prevA = kA; prevB = kB; prevW = kW;
-	}
-
-	if (g_chamsEnabled) {
-		g_paintedLast = g_paintedFrame; g_paintedFrame = 0;
-		for (int i = 0; i < 5; i++) { g_hitsLast[i] = g_m2Anchors[i].hits; g_m2Anchors[i].hits = 0; }
-		char sbuf[420];
-		_snprintf_s(sbuf, _TRUNCATE,
-			"CHAMS painted:%u F1:%s F2:%s F3:%s F4:%s F5:%s | F6-noBlend:%s F8-worldId:%s F9-filter:%s | dumps A:%d B:%d D:%d local:%d",
-			g_paintedLast,
-			g_m2Anchors[0].enabled ? "ON" : "off",
-			g_m2Anchors[1].enabled ? "ON" : "off",
-			g_m2Anchors[2].enabled ? "ON" : "off",
-			g_m2Anchors[3].enabled ? "ON" : "off",
-			g_m2Anchors[4].enabled ? "ON" : "off",
-			g_skipAlphaBlend ? "ON" : "off",
-			g_filterWorldIdentity ? "ON" : "off",
-			FilterName(g_chamsFilterMode),
-			g_captureA, g_captureB, g_captureDiag,
-			g_localValid ? 1 : 0);
-		ImGui::GetForegroundDrawList()->AddText(ImVec2(12.0f, 12.0f), IM_COL32(255, 235, 0, 255), sbuf);
-	}
-
 	CGCameraSnapshot cam;
 	const bool cameraValid = GetCameraSnapshot(cam);
 
-	// ObjectManager нужен не только рамкам ESP, но и CHAMS-фильтру/DIAG.
-	// Поэтому обновляем список объектов даже при выключенном Enable ESP.
 	if ((g_espEnabled || g_chamsEnabled) && cameraValid) {
 		int n = RefreshEntities(true, true, g_drawSelf);
-		AppendGameObjectsToEsp();
-		n = g_playerCount;
-		g_playersCached = n;
+		RebuildModelOwnerMap();
 
 		if (g_espEnabled) {
+			AppendGameObjectsToEsp();
+			n = g_playerCount;
+
 			bool tracerValid = false;
 			float tracerX = w * 0.5f, tracerY = (float)h;
 			if (g_localValid) {
@@ -1226,7 +984,7 @@ static void RenderOverlay(IDirect3DDevice9* dev) {
 		}
 	}
 	else {
-		g_playersCached = 0;
+		g_modelOwnerCount = 0;
 		g_localValid = false;
 	}
 
@@ -1257,16 +1015,19 @@ DWORD WINAPI EspInitThread(LPVOID) {
 	void* pEndScene = nullptr, * pReset = nullptr, * pSetTransform = nullptr, * pDIP = nullptr;
 	if (!GetD3D9VTable(&pEndScene, &pReset, &pSetTransform, &pDIP)) return 1;
 	g_pEndScene = pEndScene; g_pReset = pReset; g_pSetTransform = pSetTransform; g_pDIP = pDIP;
+	g_pDrawBatch = reinterpret_cast<void*>(DRAW_BATCH_ADDR);
 	MH_STATUS st = MH_Initialize();
 	if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) return 1;
 	if (MH_CreateHook(pEndScene, &hkEndScene, (void**)&oEndScene) != MH_OK) return 1;
 	if (MH_CreateHook(pReset, &hkReset, (void**)&oReset) != MH_OK) return 1;
 	MH_CreateHook(pSetTransform, &hkSetTransform, (void**)&oSetTransform);
-	MH_CreateHook(pDIP, &hkDIP, (void**)&oDIP);
+	if (MH_CreateHook(g_pDrawBatch, &hkDrawBatch, (void**)&oDrawBatch) != MH_OK) return 1;
+	if (MH_CreateHook(pDIP, &hkDIP, (void**)&oDIP) != MH_OK) return 1;
 	if (MH_EnableHook(pEndScene) != MH_OK) return 1;
 	if (MH_EnableHook(pReset) != MH_OK) return 1;
 	MH_EnableHook(pSetTransform);
-	MH_EnableHook(pDIP);
+	if (MH_EnableHook(g_pDrawBatch) != MH_OK) return 1;
+	if (MH_EnableHook(pDIP) != MH_OK) return 1;
 	return 0;
 }
 
@@ -1274,6 +1035,7 @@ void EspShutdown() {
 	g_unloading.store(true);
 	RemoveYamiPanel();
 	if (g_pDIP) MH_DisableHook(g_pDIP);
+	if (g_pDrawBatch) MH_DisableHook(g_pDrawBatch);
 	if (g_pEndScene) MH_DisableHook(g_pEndScene);
 	if (g_pReset) MH_DisableHook(g_pReset);
 	if (g_pSetTransform) MH_DisableHook(g_pSetTransform);
