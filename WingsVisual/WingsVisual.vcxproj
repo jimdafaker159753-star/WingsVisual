@@ -158,9 +158,11 @@
     <ClCompile Include="..\..\minhook\src\trampoline.c" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="ESP.cpp" />
+    <ClCompile Include="Heroes.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="EspSettings.h" />
+    <ClInclude Include="Heroes.h" />
     <ClInclude Include="Logger.h" />
     <ClInclude Include="ObjectManager.h" />
     <ClInclude Include="WorldToScreen.h" />
