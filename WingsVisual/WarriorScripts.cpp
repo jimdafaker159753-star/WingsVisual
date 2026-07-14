@@ -834,6 +834,8 @@ WR_Engine.Abilities = {
         id = 0,
         target = "Target",
         test = function()
+            -- I'm the original developer of dat profiles. Any changes, copying or sharing without my knowledge direct copyright infringement. For more info: 
+            -- Discord: https://discord.com/users/250267265285488641
         end
     },
     ["A:Hamstring"] = {

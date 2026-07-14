@@ -159,12 +159,16 @@
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="ESP.cpp" />
     <ClCompile Include="Heroes.cpp" />
+    <ClCompile Include="WarlockScripts.cpp" />
+    <ClCompile Include="WarriorScripts.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="EspSettings.h" />
     <ClInclude Include="Heroes.h" />
     <ClInclude Include="Logger.h" />
     <ClInclude Include="ObjectManager.h" />
+    <ClInclude Include="WarlockScripts.h" />
+    <ClInclude Include="WarriorScripts.h" />
     <ClInclude Include="WorldToScreen.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

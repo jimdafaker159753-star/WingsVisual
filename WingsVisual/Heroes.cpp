@@ -1,4 +1,6 @@
 #include "Heroes.h"
+#include "WarlockScripts.h"
+#include "WarriorScripts.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -25,6 +27,24 @@ namespace {
     static HWND hHeroWarlockTitle = NULL;
     static HWND hHeroWarlockInfo = NULL;
 
+    static HWND hHeroWarriorRow = NULL;
+    static HWND hHeroWarriorEnableCheck = NULL;
+    static HWND hHeroWarriorFuryCheck = NULL;
+    static HWND hHeroWarriorArmsCheck = NULL;
+    static HWND hHeroWarriorProtoCheck = NULL;
+    static HWND hHeroWarriorArmsRendCheck = NULL;
+    static HWND hHeroWarriorArmsHamstringCheck = NULL;
+    static HWND hHeroWarriorArmsPummelCheck = NULL;
+    static HWND hHeroWarriorArmsReflectCheck = NULL;
+    static HWND hHeroWarriorArmsRageCheck = NULL;
+    static HWND hHeroWarriorAutoRotationCheck = NULL;
+    static HWND hHeroWarriorAutoRotationKey = NULL;
+    static HWND hHeroWarriorDefensiveCheck = NULL;
+    static HWND hHeroWarriorGearTitle = NULL;
+    static HWND hHeroWarriorCaptureArms = NULL;
+    static HWND hHeroWarriorCaptureReflect = NULL;
+    static HWND hHeroWarriorInfo = NULL;
+
     static bool g_moduleVisible = false;
     static bool g_warlockExpanded = false;
     static bool g_warlockEnabled = false;
@@ -33,6 +53,21 @@ namespace {
     static bool g_warlockTremorEnabled = false;
     static bool g_warlockInitPending = false;
     static bool g_warlockTremorInitPending = false;
+
+    static bool g_warriorExpanded = false;
+    static bool g_warriorEnabled = false;
+    static int g_warriorMode = 0; // 0 Fury, 1 Arms, 2 Protection
+    static bool g_warriorInitPending = false;
+    static bool g_warriorArmsAutoRend = true;
+    static bool g_warriorArmsAutoHamstring = true;
+    static bool g_warriorArmsAutoPummel = true;
+    static bool g_warriorArmsAutoReflect = true;
+    static bool g_warriorArmsBerserkerRage = true;
+    static bool g_warriorAutoRotation = true;
+    static bool g_warriorAutoDefensives = true;
+    static bool g_warriorForceArmsOffense = false;
+    static int g_warriorGearCaptureMode = 0; // 1 = 2H weapon, 2 = 1H + Shield set
+    static bool g_warriorRuntimeReady = false;
 
     enum TremorBindState {
         TREMOR_BIND_IDLE = 0,
@@ -47,6 +82,13 @@ namespace {
     static volatile int g_tremorPendingHotkey = 0;
     static volatile LONG g_tremorManualActiveUntil = 0;
     static bool g_tremorHotkeyWasDown = false;
+
+    static volatile LONG g_warriorRotationBindState = TREMOR_BIND_IDLE;
+    static volatile bool g_warriorRotationBindingKey = false;
+    static volatile int g_warriorRotationHotkey = 0;
+    static volatile int g_warriorRotationPendingHotkey = 0;
+    static bool g_warriorRotationHotkeyWasDown = false;
+
     static char g_configPath[MAX_PATH] = { 0 };
 
     struct NativeTremorSlot {
@@ -108,432 +150,8 @@ namespace {
         SelectObject(d->hDC, oldFont);
     }
 
-    // ==========================================
-    // --- LUA: WARLOCK AUTOKICK ---
-    // ==========================================
-    static const char* kWarlockAutoKickInitLua = R"WARLOCK_INIT(-- AutoKick v9 - arena healer intelligence
-if AK_Init ~= 9 then
-AK_Init = 9
-AK_SpellLockID = 19647
-AK_SpellLockName = GetSpellInfo(AK_SpellLockID) or "Spell Lock"
-AK_Instant = true
-AK_KickAll = false
-AK_Announce = true
-AK_CheckImmune = true
-AK_Throttle = 0.20
-AK_Units = { "focus", "arena1", "arena2", "arena3", "target" }
-AK_LastTry = 0
-AK_LastSlotScan = 0
-AK_SpellLockSlot = nil
-AK_BlockTremorUntil = 0
-AK_Casts = {}
-AK_Roles = {}
-AK_ArenaByGUID = {}
-AK_LastHealTarget = {}
-if AK_Enabled == nil then AK_Enabled = true end
-
-AK_KickNames = {}
-AK_SpellBaseScore = {}
-AK_SpellCategory = {}
-AK_HealingEvidence = {}
-AK_KickCount = 0
-
-local function AddKickSpells(ids, baseScore, category)
-    for _, id in ipairs(ids) do
-        local name = GetSpellInfo(id)
-        if name then
-            AK_KickNames[name] = true
-            if not AK_SpellBaseScore[name] or baseScore > AK_SpellBaseScore[name] then
-                AK_SpellBaseScore[name] = baseScore
-                AK_SpellCategory[name] = category
-            end
-        end
-    end
-end
-
-local function AddHealingEvidence(ids)
-    for _, id in ipairs(ids) do
-        local name = GetSpellInfo(id)
-        if name then AK_HealingEvidence[name] = true end
-    end
-end
-
--- Resurrection / battle resurrection.
-AddKickSpells({ 2006, 7328, 2008, 50769, 20484 }, 1100, "resurrection")
--- Casted and channeled healing.
-AddKickSpells({ 635, 19750, 2060, 2061, 47540, 596, 32546, 331, 8004, 1064, 5185, 50464, 8936, 740, 64843 }, 1000, "heal")
--- Crowd control.
-AddKickSpells({ 118, 51514, 605, 6358, 2637, 710, 5782, 33786, 20066 }, 750, "control")
--- Dangerous damage channels/casts.
-AddKickSpells({ 51505, 50796, 6353, 47610, 8092, 15407, 689 }, 500, "burst")
-
--- Evidence includes instant healing spells and healing auras.
-AddHealingEvidence({
-    635, 19750, 20473, 53563, 53601,
-    2060, 2061, 32546, 596, 47540, 139, 33076, 64843,
-    331, 8004, 1064, 61295, 974,
-    5185, 8936, 50464, 740, 774, 33763, 48438, 18562
-})
-for _ in pairs(AK_KickNames) do AK_KickCount = AK_KickCount + 1 end
-
-AK_ImmuneNames = {}
-for _, id in ipairs({ 31821, 642 }) do
-    local name = GetSpellInfo(id)
-    if name then AK_ImmuneNames[name] = true end
-end
-
-AK_HealerClasses = { PALADIN = true, PRIEST = true, SHAMAN = true, DRUID = true }
-
-function AK_UpdateArenaMap()
-    local current = {}
-    for index = 1, 3 do
-        local unit = "arena" .. index
-        if UnitExists(unit) then
-            local guid = UnitGUID(unit)
-            if guid then
-                current[guid] = unit
-                local _, class = UnitClass(unit)
-                local role = AK_Roles[guid]
-                if not role then
-                    role = { score = AK_HealerClasses[class] and 10 or 0, confirmed = false, class = class, lastEvidence = 0 }
-                    AK_Roles[guid] = role
-                else
-                    role.class = class or role.class
-                end
-            end
-        end
-    end
-    AK_ArenaByGUID = current
-end
-
-function AK_AddHealerEvidence(sourceGUID, amount, destGUID)
-    if not sourceGUID then return end
-    AK_UpdateArenaMap()
-    if not AK_ArenaByGUID[sourceGUID] then return end
-    local role = AK_Roles[sourceGUID] or { score = 0, confirmed = false }
-    role.score = math.min((role.score or 0) + amount, 140)
-    role.confirmed = role.score >= 80
-    role.lastEvidence = GetTime()
-    AK_Roles[sourceGUID] = role
-    if destGUID then AK_LastHealTarget[sourceGUID] = { guid = destGUID, time = GetTime() } end
-end
-
-function AK_GetRoleBonus(guid)
-    local role = guid and AK_Roles[guid]
-    if not role then return 0 end
-    if role.confirmed then return 250 end
-    return math.min((role.score or 0) * 2, 160)
-end
-
-function AK_GetHealHealthBonus(sourceGUID)
-    local info = sourceGUID and AK_LastHealTarget[sourceGUID]
-    if not info or (GetTime() - (info.time or 0)) > 3 then return 0, nil end
-    local unit = AK_ArenaByGUID[info.guid]
-    if not unit or not UnitExists(unit) then return 0, nil end
-    local maximum = UnitHealthMax(unit)
-    if not maximum or maximum <= 0 then return 0, nil end
-    local ratio = UnitHealth(unit) / maximum
-    if ratio < 0.25 then return 350, ratio end
-    if ratio < 0.40 then return 220, ratio end
-    if ratio < 0.60 then return 100, ratio end
-    return 0, ratio
-end
-
-function AK_FindSpellLockSlot(force)
-    local now = GetTime()
-    if not force and (now - (AK_LastSlotScan or 0)) < 1 then return AK_SpellLockSlot end
-    AK_LastSlotScan = now
-    AK_SpellLockSlot = nil
-    for slot = 1, 10 do
-        local actionName, _, texture, isToken = GetPetActionInfo(slot)
-        local resolvedName = actionName
-        if isToken and actionName and _G[actionName] then resolvedName = _G[actionName] end
-        local textureText = string.lower(tostring(texture or ""))
-        if resolvedName == AK_SpellLockName or actionName == AK_SpellLockName or
-           string.find(textureText, "spell_shadow_mindrot", 1, true) then
-            AK_SpellLockSlot = slot
-            break
-        end
-    end
-    return AK_SpellLockSlot
-end
-
-function AK_CooldownActive()
-    local slot = AK_FindSpellLockSlot(false)
-    if slot then
-        local startTime, duration = GetPetActionCooldown(slot)
-        if startTime and startTime > 0 and duration and duration > 1.5 then return true end
-    end
-    local startTime, duration = GetSpellCooldown(AK_SpellLockName, BOOKTYPE_PET or "pet")
-    return startTime and startTime > 0 and duration and duration > 1.5
-end
-
-function AK_Interruptable(unit)
-    local name, _, _, _, startTime, endTime, _, _, notInterruptible = UnitCastingInfo(unit)
-    if not name then
-        local channelName, _, _, _, channelStart, channelEnd, _, channelNotInterruptible = UnitChannelInfo(unit)
-        name = channelName
-        startTime = channelStart
-        endTime = channelEnd
-        notInterruptible = channelNotInterruptible
-    end
-    if not name or notInterruptible == true or notInterruptible == 1 then return nil end
-    return name, startTime, endTime
-end
-
-function AK_IsImmune(unit)
-    if not AK_CheckImmune then return false end
-    for index = 1, 40 do
-        local buffName = UnitBuff(unit, index)
-        if not buffName then break end
-        if AK_ImmuneNames[buffName] then return true end
-    end
-    return false
-end
-
-function AK_ClassifySpell(spellName)
-    if AK_KickNames[spellName] then
-        return true, AK_SpellBaseScore[spellName] or 500, AK_SpellCategory[spellName] or "other"
-    end
-    if AK_KickAll then return true, 200, "other" end
-    return false, 0, "none"
-end
-
-function AK_GetThreshold(category, healthRatio)
-    if AK_Instant then return 0 end
-    if category == "resurrection" then return math.random(45, 60) end
-    if category == "heal" then
-        if healthRatio and healthRatio < 0.25 then return math.random(45, 58) end
-        if healthRatio and healthRatio < 0.40 then return math.random(50, 64) end
-        return math.random(60, 78)
-    end
-    if category == "control" then return math.random(55, 75) end
-    if category == "burst" then return math.random(68, 86) end
-    return math.random(72, 90)
-end
-
-function AK_GetCast(unit)
-    if not UnitExists(unit) or UnitIsDeadOrGhost(unit) or not UnitCanAttack("player", unit) then return nil end
-    local spellName, startTime, endTime = AK_Interruptable(unit)
-    if not spellName or not startTime or not endTime or endTime <= startTime then return nil end
-    local accepted, baseScore, category = AK_ClassifySpell(spellName)
-    if not accepted or AK_IsImmune(unit) then return nil end
-
-    local guid = UnitGUID(unit) or unit
-    local healthBonus, healthRatio = 0, nil
-    if category == "heal" then healthBonus, healthRatio = AK_GetHealHealthBonus(guid) end
-    local key = tostring(guid) .. ":" .. spellName .. ":" .. tostring(startTime) .. ":" .. tostring(endTime)
-    local state = AK_Casts[key]
-    if not state then
-        state = { threshold = AK_GetThreshold(category, healthRatio), lastTry = 0, lastSeen = GetTime() }
-        AK_Casts[key] = state
-    end
-    state.lastSeen = GetTime()
-
-    local now = GetTime()
-    local duration = (endTime - startTime) / 1000
-    local elapsed = now - startTime / 1000
-    local remaining = endTime / 1000 - now
-    local progress = duration > 0 and elapsed / duration * 100 or 100
-    if progress < 0 then progress = 0 elseif progress > 100 then progress = 100 end
-    local _, _, homeLatency, worldLatency = GetNetStats()
-    local emergencyWindow = math.max(homeLatency or 0, worldLatency or 0) / 1000 + 0.18
-    local fire = AK_Instant or progress >= state.threshold or remaining <= emergencyWindow
-    local roleBonus = AK_GetRoleBonus(guid)
-    local focusBonus = unit == "focus" and 180 or 0
-    local urgencyBonus = remaining <= emergencyWindow and 300 or 0
-    local score = baseScore + roleBonus + focusBonus + healthBonus + urgencyBonus + progress * 2
-
-    return {
-        unit = unit,
-        unitName = UnitName(unit) or unit,
-        guid = guid,
-        spellName = spellName,
-        category = category,
-        progress = progress,
-        remaining = remaining,
-        state = state,
-        fire = fire,
-        score = score,
-    }
-end
-
-function AK_Send(candidate)
-    if not candidate or not candidate.fire then return false end
-    local now = GetTime()
-    if (now - (candidate.state.lastTry or 0)) < 0.20 then return false end
-    candidate.state.lastTry = now
-    AK_LastTry = now
-    AK_BlockTremorUntil = now + 0.45
-    local slot = AK_FindSpellLockSlot(true)
-    if slot then
-        CastPetAction(slot, candidate.unit)
-    else
-        RunMacroText("/cast [pet:felhunter,target=" .. candidate.unit .. ",harm,nodead] " .. AK_SpellLockName)
-    end
-    if AK_Announce and DEFAULT_CHAT_FRAME then
-        local role = AK_Roles[candidate.guid]
-        local roleText = role and role.confirmed and " HEALER" or ""
-        DEFAULT_CHAT_FRAME:AddMessage("|cFFFFFF00[AutoKick TRY]|r " .. candidate.spellName .. " -> " .. candidate.unitName .. roleText)
-    end
-    return true
-end
-
-function AK_Tick()
-    if not AK_Enabled or not UnitExists("pet") or UnitIsDead("pet") or UnitIsDeadOrGhost("player") then return false end
-    if AK_CooldownActive() then return false end
-    local now = GetTime()
-    if (now - (AK_LastTry or 0)) < (AK_Throttle or 0.20) then return false end
-    AK_UpdateArenaMap()
-
-    local best = nil
-    for index = 1, table.getn(AK_Units) do
-        local candidate = AK_GetCast(AK_Units[index])
-        if candidate and candidate.fire and (not best or candidate.score > best.score) then best = candidate end
-    end
-    if best then AK_Send(best) end
-
-    for key, state in pairs(AK_Casts) do
-        if now - (state.lastSeen or now) > 2 then AK_Casts[key] = nil end
-    end
-    return false
-end
-
-if AK_EventFrame then
-    AK_EventFrame:UnregisterAllEvents()
-    AK_EventFrame:SetScript("OnEvent", nil)
-else
-    AK_EventFrame = CreateFrame("Frame")
-end
-AK_EventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
-AK_EventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-AK_EventFrame:SetScript("OnEvent", function(self, event, ...)
-    if event == "PLAYER_ENTERING_WORLD" then
-        AK_Roles = {}
-        AK_ArenaByGUID = {}
-        AK_LastHealTarget = {}
-        return
-    end
-    AK_UpdateArenaMap()
-    local _, subEvent, sourceGUID, _, _, destGUID, _, _, spellID, spellName = ...
-    spellName = spellName or (spellID and GetSpellInfo(spellID))
-    if sourceGUID and AK_ArenaByGUID[sourceGUID] and spellName and AK_HealingEvidence[spellName] then
-        local amount = 20
-        if subEvent == "SPELL_CAST_START" then amount = 35
-        elseif subEvent == "SPELL_CAST_SUCCESS" then amount = 60
-        elseif subEvent == "SPELL_AURA_APPLIED" or subEvent == "SPELL_AURA_REFRESH" then amount = 25 end
-        AK_AddHealerEvidence(sourceGUID, amount, destGUID)
-    end
-end)
-
-AK_FindSpellLockSlot(true)
-if DEFAULT_CHAT_FRAME then
-    local mode = AK_SpellLockSlot and ("pet slot " .. AK_SpellLockSlot) or "macro fallback"
-    DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[AutoKick v9]|r arena healer engine: " .. mode)
-end
-end
-return false)WARLOCK_INIT";
-
-    static const char* kWarlockAutoKickMainLua = R"WARLOCK_MAIN(if AK_Tick then AK_Tick() end
-return false)WARLOCK_MAIN";
-
-    // ==========================================
-    // --- LUA: TREMORBREAKER (EVENT-DRIVEN) ---
-    // ==========================================
-    static const char* kTremorBreakerInitLua = R"TREMOR_INIT(-- TremorBreaker v4: persistent per-GUID state
-if TB_Init ~= 6 then
-TB_Init = 6
-TB_TremorNames = { "Тотем трепета", "Tremor Totem" }
-TB_Visible = {}
-TB_Handled = {}
-TB_RequestAttack = false
-TB_PendingGUID = nil
-TB_NextAttempt = 0
-TB_SwappingTarget = false
-TB_NativeAllowed = false
-if TB_Enabled == nil then TB_Enabled = true end
-
-function TB_IsTremorName(name)
-    if not name or name == "" then return false end
-    for _, tremorName in ipairs(TB_TremorNames) do
-        if name == tremorName then return true end
-    end
-    local lowerName = string.lower(name)
-    if string.find(lowerName, "tremor", 1, true) then return true end
-    if string.find(lowerName, "трепет", 1, true) then return true end
-    return false
-end
-
-function TB_IsTremor(unit)
-    if not UnitExists(unit) or UnitIsPlayer(unit) then return false end
-    return TB_IsTremorName(UnitName(unit))
-end
-
-function TB_NormalizeGUID(guid)
-    if not guid then return nil end
-    return string.upper(guid)
-end
-
-function TB_SelectPending()
-    if not TB_Visible then TB_Visible = {} end
-    if not TB_Handled then TB_Handled = {} end
-    for guid, visible in pairs(TB_Visible) do
-        if visible and not TB_Handled[guid] then
-            TB_PendingGUID = guid
-            TB_RequestAttack = true
-            return true
-        end
-    end
-    TB_PendingGUID = nil
-    TB_RequestAttack = false
-    return false
-end
-
-function TB_AutoKickNeedsPriority()
-    if not AK_Enabled or AK_Interruptable == nil or AK_ShouldKick == nil then return false end
-    if AK_BlockTremorUntil and GetTime() < AK_BlockTremorUntil then return true end
-    if AK_Pending then return true end
-    if AK_PetCooldownActive and AK_PetCooldownActive() then return false end
-    local units = AK_Units or { "focus", "target" }
-    for i = 1, table.getn(units) do
-        local unit = units[i]
-        if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitCanAttack("player", unit) == 1 then
-            local spellName = AK_Interruptable(unit)
-            if spellName and AK_ShouldKick(spellName) then return true end
-        end
-    end
-    return false
-end
-
-if DEFAULT_CHAT_FRAME then
-    DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[TremorBreaker v4]|r persistent GUID tracker ready.")
-end
-end
-return false)TREMOR_INIT";
-
-    static const char* kTremorBreakerMainLua = R"TREMOR_MAIN(-- TremorBreaker v5: permission check before native pet command
-TB_NativeAllowed = false
-if not TB_Enabled then return false end
-if GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus() then return false end
-if not UnitExists("pet") or UnitIsDead("pet") then return false end
-if UnitIsDeadOrGhost("player") then return false end
-if UnitCastingInfo("player") or UnitChannelInfo("player") then return false end
-if UnitCastingInfo("pet") or UnitChannelInfo("pet") then return false end
-if AK_BlockTremorUntil and GetTime() < AK_BlockTremorUntil then return false end
-if TB_AutoKickNeedsPriority and TB_AutoKickNeedsPriority() then return false end
-TB_NativeAllowed = true
-return false)TREMOR_MAIN";
-
-    static const char* kTremorBreakerNativeAttackLua = R"TREMOR_ATTACK(-- Native code temporarily bridges target GUID without target events.
-if TB_NativeAllowed
-and UnitExists("target")
-and not UnitIsDead("target")
-and UnitCanAttack("player", "target") == 1
-and TB_IsTremor("target") then
-PetAttack()
-end
-TB_NativeAllowed = false
-return false)TREMOR_ATTACK";
+    // Warlock and Tremor Lua sources were moved unchanged to
+    // WarlockScripts.cpp. Runtime behavior remains in Heroes.cpp for stage 1.
 
     namespace TremorObjectManager {
 
@@ -779,6 +397,21 @@ return false)TREMOR_ATTACK";
         }
     }
 
+    static void DrawGearCapture(LPDRAWITEMSTRUCT d, const char* label, bool selected) {
+        RECT rc = d->rcItem;
+        HBRUSH bg = CreateSolidBrush(selected ? g_theme.goldDark : g_theme.box);
+        FillRect(d->hDC, &rc, bg);
+        DeleteObject(bg);
+        HBRUSH frame = CreateSolidBrush(g_theme.gold);
+        FrameRect(d->hDC, &rc, frame);
+        DeleteObject(frame);
+        SetBkMode(d->hDC, TRANSPARENT);
+        SetTextColor(d->hDC, selected ? g_theme.gold : g_theme.text);
+        HFONT oldFont = (HFONT)SelectObject(d->hDC, hFontNorm);
+        DrawTextA(d->hDC, label, -1, &rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        SelectObject(d->hDC, oldFont);
+    }
+
     static void DrawHeroRow(LPDRAWITEMSTRUCT d, const char* label, bool expanded) {
         RECT rc = d->rcItem;
         HBRUSH bg = CreateSolidBrush(expanded ? g_theme.goldDark : g_theme.box);
@@ -843,6 +476,50 @@ return false)TREMOR_ATTACK";
         SelectObject(d->hDC, oldFont);
     }
 
+    static void GetWarriorRotationHotkeyName(char* output, size_t outputSize) {
+        if (!output || outputSize == 0) return;
+        if (g_warriorRotationBindingKey) {
+            strcpy_s(output, outputSize, "Press key... ESC cancel, DEL clear");
+            return;
+        }
+        const int key = g_warriorRotationHotkey;
+        if (!key) {
+            strcpy_s(output, outputSize, "Rotation hotkey: [Not set]");
+            return;
+        }
+        char keyName[64] = { 0 };
+        if (key == VK_MBUTTON) strcpy_s(keyName, "Mouse Middle");
+        else if (key == VK_XBUTTON1) strcpy_s(keyName, "Mouse 4");
+        else if (key == VK_XBUTTON2) strcpy_s(keyName, "Mouse 5");
+        UINT scanCode = MapVirtualKeyA((UINT)key, MAPVK_VK_TO_VSC) << 16;
+        if (key == VK_LEFT || key == VK_RIGHT || key == VK_UP || key == VK_DOWN ||
+            key == VK_INSERT || key == VK_DELETE || key == VK_HOME || key == VK_END ||
+            key == VK_PRIOR || key == VK_NEXT || key == VK_DIVIDE || key == VK_NUMLOCK) {
+            scanCode |= 1u << 24;
+        }
+        if (!keyName[0] && !GetKeyNameTextA((LONG)scanCode, keyName, (int)sizeof(keyName))) {
+            sprintf_s(keyName, "VK_%02X", key);
+        }
+        sprintf_s(output, outputSize, "Rotation hotkey: [%s]", keyName);
+    }
+
+    static void DrawWarriorRotationKeyBind(LPDRAWITEMSTRUCT d) {
+        RECT rc = d->rcItem;
+        HBRUSH bg = CreateSolidBrush(g_warriorRotationBindingKey ? g_theme.goldDark : g_theme.box);
+        FillRect(d->hDC, &rc, bg);
+        DeleteObject(bg);
+        HBRUSH frame = CreateSolidBrush(g_theme.gold);
+        FrameRect(d->hDC, &rc, frame);
+        DeleteObject(frame);
+        SetBkMode(d->hDC, TRANSPARENT);
+        SetTextColor(d->hDC, g_warriorRotationBindingKey ? g_theme.gold : g_theme.text);
+        HFONT oldFont = (HFONT)SelectObject(d->hDC, hFontNorm);
+        char text[128] = { 0 };
+        GetWarriorRotationHotkeyName(text, sizeof(text));
+        DrawTextA(d->hDC, text, -1, &rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        SelectObject(d->hDC, oldFont);
+    }
+
     static void InitConfigPath() {
         GetModuleFileNameA(hSelf, g_configPath, MAX_PATH);
         char* slash = strrchr(g_configPath, '\\');
@@ -863,6 +540,19 @@ return false)TREMOR_ATTACK";
         WritePrivateProfileStringA("Warlock", "TremorHotkey", value, g_configPath);
     }
 
+    static void LoadWarriorRotationHotkey() {
+        if (!g_configPath[0]) InitConfigPath();
+        int key = GetPrivateProfileIntA("Warrior", "AutoRotationHotkey", 0, g_configPath);
+        if (key >= 0 && key < 256 && key != VK_END && key != VK_OEM_7) g_warriorRotationHotkey = key;
+    }
+
+    static void SaveWarriorRotationHotkey() {
+        if (!g_configPath[0]) InitConfigPath();
+        char value[16] = { 0 };
+        sprintf_s(value, "%d", (int)g_warriorRotationHotkey);
+        WritePrivateProfileStringA("Warrior", "AutoRotationHotkey", value, g_configPath);
+    }
+
     static bool IsSupportedTremorBindKey(int key) {
         if (key == VK_MBUTTON || key == VK_XBUTTON1 || key == VK_XBUTTON2) return true;
         if (key < 8 || key >= 256) return false;
@@ -880,6 +570,11 @@ return false)TREMOR_ATTACK";
 
     static void FinishTremorBinding(int selectedKey, bool cancel) {
         if (!cancel) {
+            if (selectedKey != 0 && selectedKey == g_warriorRotationHotkey) {
+                g_warriorRotationHotkey = 0;
+                SaveWarriorRotationHotkey();
+                if (hHeroWarriorAutoRotationKey) InvalidateRect(hHeroWarriorAutoRotationKey, NULL, TRUE);
+            }
             g_tremorHotkey = selectedKey;
             SaveTremorHotkey();
         }
@@ -934,6 +629,11 @@ return false)TREMOR_ATTACK";
             return;
         }
 
+        if (g_warriorRotationBindingKey) {
+            g_tremorHotkeyWasDown = false;
+            return;
+        }
+
         const int key = g_tremorHotkey;
         if (!key) {
             g_tremorHotkeyWasDown = false;
@@ -947,23 +647,160 @@ return false)TREMOR_ATTACK";
         g_tremorHotkeyWasDown = down;
     }
 
+    static void FinishWarriorRotationBinding(int selectedKey, bool cancel) {
+        if (!cancel) {
+            if (selectedKey != 0 && selectedKey == g_tremorHotkey) {
+                g_tremorHotkey = 0;
+                SaveTremorHotkey();
+                if (hHeroWarlockTremorKey) InvalidateRect(hHeroWarlockTremorKey, NULL, TRUE);
+            }
+            g_warriorRotationHotkey = selectedKey;
+            SaveWarriorRotationHotkey();
+        }
+        g_warriorRotationPendingHotkey = 0;
+        g_warriorRotationBindingKey = false;
+        InterlockedExchange(&g_warriorRotationBindState, TREMOR_BIND_IDLE);
+        g_warriorRotationHotkeyWasDown = false;
+        if (hHeroWarriorAutoRotationKey) InvalidateRect(hHeroWarriorAutoRotationKey, NULL, TRUE);
+    }
+
+    static void PollWarriorRotationHotkeyGameThread() {
+        static bool previousDown[256] = { false };
+        static DWORD allReleasedSince = 0;
+        const DWORD now = (DWORD)GetTickCount64();
+        const LONG state = InterlockedCompareExchange(&g_warriorRotationBindState, 0, 0);
+
+        if (state == TREMOR_BIND_WAIT_RELEASE) {
+            if (IsAnyTremorBindKeyDown()) allReleasedSince = 0;
+            else {
+                if (!allReleasedSince) allReleasedSince = now;
+                if ((now - allReleasedSince) >= 120) {
+                    for (int key = 0; key < 256; ++key) previousDown[key] = false;
+                    InterlockedExchange(&g_warriorRotationBindState, TREMOR_BIND_CAPTURE);
+                }
+            }
+            return;
+        }
+
+        if (state == TREMOR_BIND_CAPTURE) {
+            for (int key = 1; key < 256; ++key) {
+                const bool down = (GetAsyncKeyState(key) & 0x8000) != 0;
+                if (down && !previousDown[key]) {
+                    if (key == VK_ESCAPE) g_warriorRotationPendingHotkey = -1;
+                    else if (key == VK_BACK || key == VK_DELETE) g_warriorRotationPendingHotkey = 0;
+                    else if (IsSupportedTremorBindKey(key)) g_warriorRotationPendingHotkey = key;
+                    else continue;
+                    InterlockedExchange(&g_warriorRotationBindState, TREMOR_BIND_WAIT_SELECTED_RELEASE);
+                    previousDown[key] = true;
+                    return;
+                }
+                previousDown[key] = down;
+            }
+            return;
+        }
+
+        if (state == TREMOR_BIND_WAIT_SELECTED_RELEASE) {
+            if (!IsAnyTremorBindKeyDown()) {
+                const int pending = g_warriorRotationPendingHotkey;
+                FinishWarriorRotationBinding(pending < 0 ? g_warriorRotationHotkey : pending, pending < 0);
+                allReleasedSince = 0;
+            }
+            return;
+        }
+
+        if (g_tremorBindingKey) {
+            g_warriorRotationHotkeyWasDown = false;
+            return;
+        }
+        const int key = g_warriorRotationHotkey;
+        if (!key) {
+            g_warriorRotationHotkeyWasDown = false;
+            return;
+        }
+        const bool down = (GetAsyncKeyState(key) & 0x8000) != 0;
+        if (down && !g_warriorRotationHotkeyWasDown) {
+            g_warriorAutoRotation = !g_warriorAutoRotation;
+            if (g_warriorAutoRotation) {
+                ExecuteLuaNow("WR_AutoRotation=true; if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage('|cFFFFD10A[YamiYami]|r Auto Rotation: |cff33ff33ON|r') end");
+            }
+            else {
+                ExecuteLuaNow("WR_AutoRotation=false; if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage('|cFFFFD10A[YamiYami]|r Auto Rotation: |cffff5555OFF|r') end");
+            }
+            if (hHeroWarriorInfo) {
+                SetWindowTextA(hHeroWarriorInfo, g_warriorAutoRotation
+                    ? "Auto rotation ON (hotkey)."
+                    : "Auto rotation OFF (hotkey) - interrupt, reflect, rend, hamstring still run.");
+            }
+            if (hHeroWarriorAutoRotationCheck) InvalidateRect(hHeroWarriorAutoRotationCheck, NULL, TRUE);
+        }
+        g_warriorRotationHotkeyWasDown = down;
+    }
+
+
+    // Warrior Lua sources were moved unchanged to WarriorScripts.cpp.
+    // Runtime state, UI, hotkeys and gear capture remain here for stage 1.
+
     static void RunHeroScriptsTick() {
         PollTremorHotkeyGameThread();
+        PollWarriorRotationHotkeyGameThread();
+
+        if (!g_warriorRuntimeReady) {
+            // WR_Engine.Enabled defaults to false inside this Lua, so loading it early
+            // only registers the gear-capture tooltip hook and helper functions.
+            ExecuteLuaNow(WarriorScripts::RotationInit);
+            ExecuteLuaNow(WarriorScripts::AutoDefensives);
+            ExecuteLuaNow(WarriorScripts::KickReflectFix);
+            ExecuteLuaNow(WarriorScripts::PvPCore);
+            g_warriorRuntimeReady = true;
+        }
+        if (!g_warriorEnabled && g_warriorGearCaptureMode != 0) {
+            ExecuteLuaNow("if WR_GearCaptureTick then WR_GearCaptureTick() end");
+        }
 
         if (g_warlockEnabled) {
             if (g_warlockInitPending) {
-                ExecuteLuaNow(kWarlockAutoKickInitLua);
+                ExecuteLuaNow(WarlockScripts::AutoKickInit);
                 ExecuteLuaNow("AK_Enabled = true");
                 ExecuteLuaNow(g_warlockKickAll ? "AK_KickAll = true" : "AK_KickAll = false");
                 ExecuteLuaNow(g_warlockInstant ? "AK_Instant = true" : "AK_Instant = false");
                 g_warlockInitPending = false;
             }
-            ExecuteLuaNow(kWarlockAutoKickMainLua);
+            ExecuteLuaNow(WarlockScripts::AutoKickMain);
+        }
+
+        if (g_warriorEnabled) {
+            if (g_warriorInitPending) {
+                ExecuteLuaNow(WarriorScripts::RotationInit);
+                const char* mode = g_warriorMode == 1 ? "Arms_DPS_DarhangeR" :
+                    g_warriorMode == 2 ? "Proto_Tank_DarhangeR" :
+                    "Fury_DPS_DarhangeR";
+                char command[128] = { 0 };
+                sprintf_s(command, "WR_Engine.CurrentRotation=%c%s%c; WR_Engine.Enabled=true", 39, mode, 39);
+                ExecuteLuaNow(command);
+                ExecuteLuaNow(WarriorScripts::AutoDefensives);
+                ExecuteLuaNow(WarriorScripts::KickReflectFix);
+                ExecuteLuaNow(WarriorScripts::PvPCore);
+                ExecuteLuaNow(g_warriorArmsAutoRend ? "WR_ArmsAutoRend=true" : "WR_ArmsAutoRend=false");
+                ExecuteLuaNow(g_warriorArmsAutoHamstring ? "WR_ArmsAutoHamstring=true" : "WR_ArmsAutoHamstring=false");
+                ExecuteLuaNow(g_warriorArmsAutoPummel ? "WR_ArmsAutoPummel=true" : "WR_ArmsAutoPummel=false");
+                ExecuteLuaNow(g_warriorArmsAutoReflect ? "WR_ArmsAutoReflect=true" : "WR_ArmsAutoReflect=false");
+                ExecuteLuaNow(g_warriorArmsBerserkerRage ? "WR_ArmsBerserkerRage=true" : "WR_ArmsBerserkerRage=false");
+                ExecuteLuaNow(g_warriorAutoRotation ? "WR_AutoRotation=true" : "WR_AutoRotation=false");
+                ExecuteLuaNow(g_warriorAutoDefensives ? "WR_AutoDefensives=true" : "WR_AutoDefensives=false");
+                if (g_warriorForceArmsOffense) {
+                    ExecuteLuaNow("WR_AutoRotation=true; if WR_Engine and WR_Engine.DefensiveActive then WR_Engine.DefensiveManualOverride=true; WR_Engine.DefensiveHoldUntil=nil; WR_Engine.ArmsResponse=nil; WR_Engine.ReflectHoldUntil=nil end");
+                    g_warriorForceArmsOffense = false;
+                }
+                if (g_warriorGearCaptureMode == 1) ExecuteLuaNow("if WR_StartArmsCapture then WR_StartArmsCapture() end");
+                else if (g_warriorGearCaptureMode == 2) ExecuteLuaNow("if WR_StartReflectCapture then WR_StartReflectCapture() end");
+                g_warriorInitPending = false;
+            }
+            ExecuteLuaNow("if WR_Engine and WR_Engine.Tick then WR_Engine.Tick() end");
         }
 
         if (g_warlockTremorEnabled) {
             if (g_warlockTremorInitPending) {
-                ExecuteLuaNow(kTremorBreakerInitLua);
+                ExecuteLuaNow(WarlockScripts::TremorInit);
                 ExecuteLuaNow("TB_Enabled=true; TB_NativeAllowed=false");
                 g_warlockTremorInitPending = false;
                 ResetNativeTremorSlots(false);
@@ -971,6 +808,93 @@ return false)TREMOR_ATTACK";
             }
             UpdateNativeTremorDetector();
         }
+    }
+
+
+    static void RepositionHeroControls() {
+        if (!hMenu) return;
+
+        const int rootState = g_moduleVisible ? SW_SHOW : SW_HIDE;
+        ShowWindow(hHeroWarlockRow, rootState);
+        ShowWindow(hHeroWarriorRow, rootState);
+
+        int y = 134;
+        MoveWindow(hHeroWarlockRow, 24, y, 404, 28, TRUE);
+        y += 38;
+        const int warlockState = (g_moduleVisible && g_warlockExpanded) ? SW_SHOW : SW_HIDE;
+        ShowWindow(hHeroWarlockCheck, warlockState);
+        ShowWindow(hHeroWarlockKickAllCheck, warlockState);
+        ShowWindow(hHeroWarlockInstantCheck, warlockState);
+        ShowWindow(hHeroWarlockTremorCheck, warlockState);
+        ShowWindow(hHeroWarlockTremorKey, warlockState);
+        ShowWindow(hHeroWarlockTitle, warlockState);
+        ShowWindow(hHeroWarlockInfo, warlockState);
+        if (g_warlockExpanded) {
+            MoveWindow(hHeroWarlockCheck, 40, y, 388, 24, TRUE);
+            MoveWindow(hHeroWarlockTitle, 40, y + 30, 388, 22, TRUE);
+            MoveWindow(hHeroWarlockKickAllCheck, 40, y + 58, 388, 24, TRUE);
+            MoveWindow(hHeroWarlockInstantCheck, 40, y + 88, 388, 24, TRUE);
+            MoveWindow(hHeroWarlockTremorCheck, 40, y + 118, 388, 24, TRUE);
+            MoveWindow(hHeroWarlockTremorKey, 40, y + 148, 388, 26, TRUE);
+            MoveWindow(hHeroWarlockInfo, 40, y + 182, 388, 22, TRUE);
+            y += 220;
+        }
+
+        MoveWindow(hHeroWarriorRow, 24, y, 404, 28, TRUE);
+        y += 38;
+        const int warriorState = (g_moduleVisible && g_warriorExpanded) ? SW_SHOW : SW_HIDE;
+        ShowWindow(hHeroWarriorEnableCheck, warriorState);
+        ShowWindow(hHeroWarriorFuryCheck, warriorState);
+        ShowWindow(hHeroWarriorArmsCheck, warriorState);
+        ShowWindow(hHeroWarriorProtoCheck, warriorState);
+        ShowWindow(hHeroWarriorAutoRotationCheck, warriorState);
+        ShowWindow(hHeroWarriorAutoRotationKey, warriorState);
+        ShowWindow(hHeroWarriorDefensiveCheck, warriorState);
+        const int armsOptionsState = (g_moduleVisible && g_warriorExpanded) ? SW_SHOW : SW_HIDE;
+        ShowWindow(hHeroWarriorArmsRendCheck, armsOptionsState);
+        ShowWindow(hHeroWarriorArmsHamstringCheck, armsOptionsState);
+        ShowWindow(hHeroWarriorArmsPummelCheck, armsOptionsState);
+        ShowWindow(hHeroWarriorArmsReflectCheck, armsOptionsState);
+        ShowWindow(hHeroWarriorArmsRageCheck, armsOptionsState);
+        ShowWindow(hHeroWarriorGearTitle, armsOptionsState);
+        ShowWindow(hHeroWarriorCaptureArms, armsOptionsState);
+        ShowWindow(hHeroWarriorCaptureReflect, armsOptionsState);
+        ShowWindow(hHeroWarriorInfo, warriorState);
+        if (g_warriorExpanded) {
+            MoveWindow(hHeroWarriorEnableCheck, 40, y, 200, 24, TRUE);
+            MoveWindow(hHeroWarriorFuryCheck, 40, y + 30, 200, 24, TRUE);
+            MoveWindow(hHeroWarriorArmsCheck, 40, y + 60, 200, 24, TRUE);
+            MoveWindow(hHeroWarriorProtoCheck, 40, y + 90, 200, 24, TRUE);
+            MoveWindow(hHeroWarriorAutoRotationCheck, 40, y + 120, 200, 24, TRUE);
+            MoveWindow(hHeroWarriorAutoRotationKey, 40, y + 150, 200, 24, TRUE);
+            // Keep settings in fixed positions for every spec so controls never flicker or disappear.
+            MoveWindow(hHeroWarriorArmsRendCheck, 248, y, 180, 24, TRUE);
+            MoveWindow(hHeroWarriorArmsHamstringCheck, 248, y + 30, 180, 24, TRUE);
+            MoveWindow(hHeroWarriorArmsPummelCheck, 248, y + 60, 180, 24, TRUE);
+            MoveWindow(hHeroWarriorArmsReflectCheck, 248, y + 90, 180, 24, TRUE);
+            MoveWindow(hHeroWarriorArmsRageCheck, 248, y + 120, 180, 24, TRUE);
+            MoveWindow(hHeroWarriorDefensiveCheck, 248, y + 150, 180, 24, TRUE);
+            MoveWindow(hHeroWarriorInfo, 40, y + 180, 470, 34, TRUE);
+            MoveWindow(hHeroWarriorGearTitle, 40, y + 218, 470, 20, TRUE);
+            MoveWindow(hHeroWarriorCaptureArms, 40, y + 244, 180, 24, TRUE);
+            MoveWindow(hHeroWarriorCaptureReflect, 234, y + 244, 180, 24, TRUE);
+        }
+    }
+
+    static void SelectWarriorMode(int mode) {
+        g_warriorMode = mode;
+        if (mode == 1) {
+            g_warriorAutoRotation = true;
+            g_warriorForceArmsOffense = true;
+            QueueLua("WR_AutoRotation=true");
+            SetWindowTextA(hHeroWarriorInfo, "Arms selected - leaving defense, Auto Rotation ON.");
+            InvalidateRect(hHeroWarriorAutoRotationCheck, NULL, TRUE);
+        }
+        if (g_warriorEnabled) g_warriorInitPending = true;
+        RepositionHeroControls();
+        InvalidateRect(hHeroWarriorFuryCheck, NULL, TRUE);
+        InvalidateRect(hHeroWarriorArmsCheck, NULL, TRUE);
+        InvalidateRect(hHeroWarriorProtoCheck, NULL, TRUE);
     }
 
 } // namespace
@@ -1008,8 +932,35 @@ bool HeroesInitialize(
         "Smart Arena healer priority. Tremor works only by hotkey.",
         40, 354, 388, hFontNorm);
 
+    hHeroWarriorRow = CreateWindowA(
+        "BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+        24, 390, 404, 28, hMenu, (HMENU)300, hSelf, NULL);
+    hHeroWarriorEnableCheck = CreateCheck(301, 40, 428, 388);
+    hHeroWarriorFuryCheck = CreateCheck(302, 40, 458, 388);
+    hHeroWarriorArmsCheck = CreateCheck(303, 40, 488, 388);
+    hHeroWarriorProtoCheck = CreateCheck(304, 40, 518, 388);
+    hHeroWarriorArmsRendCheck = CreateCheck(305, 40, 548, 388);
+    hHeroWarriorArmsHamstringCheck = CreateCheck(306, 40, 578, 388);
+    hHeroWarriorArmsPummelCheck = CreateCheck(307, 40, 608, 388);
+    hHeroWarriorArmsReflectCheck = CreateCheck(308, 40, 638, 388);
+    hHeroWarriorArmsRageCheck = CreateCheck(309, 40, 668, 388);
+    hHeroWarriorAutoRotationCheck = CreateCheck(313, 40, 698, 388);
+    hHeroWarriorAutoRotationKey = CreateWindowA(
+        "BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+        40, 728, 200, 24, hMenu, (HMENU)315, hSelf, NULL);
+    hHeroWarriorDefensiveCheck = CreateCheck(314, 40, 728, 388);
+    hHeroWarriorGearTitle = CreateLabel("Weapons: click a setup button, then hover the item. 1H and shield work in either order.", 40, 698, 470, hFontNorm);
+    hHeroWarriorCaptureArms = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+        40, 724, 180, 24, hMenu, (HMENU)310, hSelf, NULL);
+    hHeroWarriorCaptureReflect = CreateWindowA("BUTTON", "", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+        234, 724, 180, 24, hMenu, (HMENU)311, hSelf, NULL);
+    hHeroWarriorInfo = CreateLabel(
+        "DarhangeR profile: Fury / Arms / Protection. Warrior only.",
+        40, 550, 388, hFontNorm);
+
     InitConfigPath();
     LoadTremorHotkey();
+    LoadWarriorRotationHotkey();
     HeroesSetVisible(false);
     return true;
 }
@@ -1020,26 +971,31 @@ void HeroesTick() {
 
 void HeroesSetVisible(bool visible) {
     g_moduleVisible = visible;
-    const int rootState = visible ? SW_SHOW : SW_HIDE;
-    ShowWindow(hLblHeroes, rootState);
-    ShowWindow(hHeroWarlockRow, rootState);
-
-    const int sectionState = (visible && g_warlockExpanded) ? SW_SHOW : SW_HIDE;
-    ShowWindow(hHeroWarlockCheck, sectionState);
-    ShowWindow(hHeroWarlockKickAllCheck, sectionState);
-    ShowWindow(hHeroWarlockInstantCheck, sectionState);
-    ShowWindow(hHeroWarlockTremorCheck, sectionState);
-    ShowWindow(hHeroWarlockTremorKey, sectionState);
-    ShowWindow(hHeroWarlockTitle, sectionState);
-    ShowWindow(hHeroWarlockInfo, sectionState);
-
+    ShowWindow(hLblHeroes, visible ? SW_SHOW : SW_HIDE);
+    RepositionHeroControls();
     if (hHeroWarlockRow) InvalidateRect(hHeroWarlockRow, NULL, TRUE);
+    if (hHeroWarriorRow) InvalidateRect(hHeroWarriorRow, NULL, TRUE);
 }
 
 bool HeroesDrawItem(LPDRAWITEMSTRUCT d) {
     if (!d) return false;
     switch (d->CtlID) {
     case 200: DrawHeroRow(d, "Warlock", g_warlockExpanded); return true;
+    case 300: DrawHeroRow(d, "Warrior", g_warriorExpanded); return true;
+    case 301: DrawCheck(d, "Enable Warrior rotation", g_warriorEnabled, false); return true;
+    case 302: DrawCheck(d, "Fury DPS", g_warriorMode == 0, false); return true;
+    case 303: DrawCheck(d, "Arms DPS", g_warriorMode == 1, false); return true;
+    case 304: DrawCheck(d, "Protection Tank", g_warriorMode == 2, false); return true;
+    case 305: DrawCheck(d, "Auto Rend", g_warriorArmsAutoRend, false); return true;
+    case 306: DrawCheck(d, "Auto Hamstring", g_warriorArmsAutoHamstring, false); return true;
+    case 307: DrawCheck(d, "Auto Interrupt", g_warriorArmsAutoPummel, false); return true;
+    case 308: DrawCheck(d, "Auto Reflect", g_warriorArmsAutoReflect, false); return true;
+    case 309: DrawCheck(d, "Berserker Rage", g_warriorArmsBerserkerRage, false); return true;
+    case 313: DrawCheck(d, "Auto Rotation", g_warriorAutoRotation, false); return true;
+    case 314: DrawCheck(d, "Auto Defensives", g_warriorAutoDefensives, false); return true;
+    case 315: DrawWarriorRotationKeyBind(d); return true;
+    case 310: DrawGearCapture(d, "2H weapon", g_warriorGearCaptureMode == 1); return true;
+    case 311: DrawGearCapture(d, "1H + Shield", g_warriorGearCaptureMode == 2); return true;
     case 201: DrawCheck(d, "Enable AutoKick Spell Lock", g_warlockEnabled, false); return true;
     case 202: DrawCheck(d, "Kick All Spells (vs list only)", g_warlockKickAll, false); return true;
     case 203: DrawCheck(d, "Instant Kick (vs anti-fake)", g_warlockInstant, false); return true;
@@ -1053,7 +1009,107 @@ bool HeroesHandleCommand(UINT id) {
     switch (id) {
     case 200:
         g_warlockExpanded = !g_warlockExpanded;
-        HeroesSetVisible(g_moduleVisible);
+        if (g_warlockExpanded) g_warriorExpanded = false;
+        RepositionHeroControls();
+        InvalidateRect(hHeroWarlockRow, NULL, TRUE);
+        InvalidateRect(hHeroWarriorRow, NULL, TRUE);
+        return true;
+    case 300:
+        g_warriorExpanded = !g_warriorExpanded;
+        if (g_warriorExpanded) g_warlockExpanded = false;
+        RepositionHeroControls();
+        InvalidateRect(hHeroWarlockRow, NULL, TRUE);
+        InvalidateRect(hHeroWarriorRow, NULL, TRUE);
+        return true;
+    case 301:
+        g_warriorEnabled = !g_warriorEnabled;
+        g_warriorInitPending = g_warriorEnabled;
+        if (!g_warriorEnabled) QueueLua("if WR_Engine then WR_Engine.Enabled=false end");
+        InvalidateRect(hHeroWarriorEnableCheck, NULL, TRUE);
+        return true;
+    case 302:
+        SelectWarriorMode(0);
+        return true;
+    case 303:
+        SelectWarriorMode(1);
+        return true;
+    case 304:
+        SelectWarriorMode(2);
+        return true;
+    case 305:
+        g_warriorArmsAutoRend = !g_warriorArmsAutoRend;
+        QueueLua(g_warriorArmsAutoRend ? "WR_ArmsAutoRend=true" : "WR_ArmsAutoRend=false");
+        InvalidateRect(hHeroWarriorArmsRendCheck, NULL, TRUE);
+        return true;
+    case 306:
+        g_warriorArmsAutoHamstring = !g_warriorArmsAutoHamstring;
+        QueueLua(g_warriorArmsAutoHamstring ? "WR_ArmsAutoHamstring=true" : "WR_ArmsAutoHamstring=false");
+        InvalidateRect(hHeroWarriorArmsHamstringCheck, NULL, TRUE);
+        return true;
+    case 307:
+        g_warriorArmsAutoPummel = !g_warriorArmsAutoPummel;
+        QueueLua(g_warriorArmsAutoPummel ? "WR_ArmsAutoPummel=true" : "WR_ArmsAutoPummel=false");
+        InvalidateRect(hHeroWarriorArmsPummelCheck, NULL, TRUE);
+        return true;
+    case 308:
+        g_warriorArmsAutoReflect = !g_warriorArmsAutoReflect;
+        QueueLua(g_warriorArmsAutoReflect ? "WR_ArmsAutoReflect=true" : "WR_ArmsAutoReflect=false");
+        InvalidateRect(hHeroWarriorArmsReflectCheck, NULL, TRUE);
+        return true;
+    case 309:
+        g_warriorArmsBerserkerRage = !g_warriorArmsBerserkerRage;
+        QueueLua(g_warriorArmsBerserkerRage ? "WR_ArmsBerserkerRage=true" : "WR_ArmsBerserkerRage=false");
+        InvalidateRect(hHeroWarriorArmsRageCheck, NULL, TRUE);
+        return true;
+    case 313:
+        g_warriorAutoRotation = !g_warriorAutoRotation;
+        QueueLua(g_warriorAutoRotation ? "WR_AutoRotation=true" : "WR_AutoRotation=false");
+        SetWindowTextA(hHeroWarriorInfo, g_warriorAutoRotation ? "Auto rotation ON." : "Auto rotation OFF - interrupt, reflect, rend, hamstring still run.");
+        InvalidateRect(hHeroWarriorAutoRotationCheck, NULL, TRUE);
+        return true;
+    case 315:
+        g_tremorBindingKey = false;
+        InterlockedExchange(&g_tremorBindState, TREMOR_BIND_IDLE);
+        g_warriorRotationPendingHotkey = 0;
+        g_warriorRotationBindingKey = true;
+        InterlockedExchange(&g_warriorRotationBindState, TREMOR_BIND_WAIT_RELEASE);
+        InvalidateRect(hHeroWarriorAutoRotationKey, NULL, TRUE);
+        return true;
+    case 314:
+        g_warriorAutoDefensives = !g_warriorAutoDefensives;
+        QueueLua(g_warriorAutoDefensives ? "WR_AutoDefensives=true" : "WR_AutoDefensives=false");
+        SetWindowTextA(hHeroWarriorInfo, g_warriorAutoDefensives
+            ? "Auto Defensives ON: Last Stand, Shield Wall and Shield Block at low HP."
+            : "Auto Defensives OFF: returning to 2H and Battle Stance.");
+        InvalidateRect(hHeroWarriorDefensiveCheck, NULL, TRUE);
+        return true;
+    case 310:
+        if (g_warriorGearCaptureMode == 1) {
+            g_warriorGearCaptureMode = 0;
+            QueueLua("if WR_CancelCapture then WR_CancelCapture() end");
+            SetWindowTextA(hHeroWarriorInfo, "Weapon setup closed.");
+        }
+        else {
+            g_warriorGearCaptureMode = 1;
+            QueueLua("if WR_StartArmsCapture then WR_StartArmsCapture() end");
+            SetWindowTextA(hHeroWarriorInfo, "2H: hover the two-handed weapon.");
+        }
+        InvalidateRect(hHeroWarriorCaptureArms, NULL, TRUE);
+        InvalidateRect(hHeroWarriorCaptureReflect, NULL, TRUE);
+        return true;
+    case 311:
+        if (g_warriorGearCaptureMode == 2) {
+            g_warriorGearCaptureMode = 0;
+            QueueLua("if WR_CancelCapture then WR_CancelCapture() end");
+            SetWindowTextA(hHeroWarriorInfo, "Weapon setup closed.");
+        }
+        else {
+            g_warriorGearCaptureMode = 2;
+            QueueLua("if WR_StartReflectCapture then WR_StartReflectCapture() end");
+            SetWindowTextA(hHeroWarriorInfo, "1H + Shield: hover the 1H weapon and shield in either order.");
+        }
+        InvalidateRect(hHeroWarriorCaptureArms, NULL, TRUE);
+        InvalidateRect(hHeroWarriorCaptureReflect, NULL, TRUE);
         return true;
     case 201:
         g_warlockEnabled = !g_warlockEnabled;
@@ -1089,6 +1145,8 @@ bool HeroesHandleCommand(UINT id) {
         InvalidateRect(hHeroWarlockTremorCheck, NULL, TRUE);
         return true;
     case 205:
+        g_warriorRotationBindingKey = false;
+        InterlockedExchange(&g_warriorRotationBindState, TREMOR_BIND_IDLE);
         g_tremorPendingHotkey = 0;
         g_tremorBindingKey = true;
         InterlockedExchange(&g_tremorBindState, TREMOR_BIND_WAIT_RELEASE);
@@ -1100,20 +1158,27 @@ bool HeroesHandleCommand(UINT id) {
 }
 
 bool HeroesHandleStaticColor(HWND control, HDC dc, LRESULT& result) {
-    if (control != hLblHeroes && control != hHeroWarlockTitle && control != hHeroWarlockInfo) return false;
+    if (control != hLblHeroes && control != hHeroWarlockTitle && control != hHeroWarlockInfo && control != hHeroWarriorInfo) return false;
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, (control == hHeroWarlockInfo) ? g_theme.text : g_theme.gold);
+    SetTextColor(dc, (control == hHeroWarlockInfo || control == hHeroWarriorInfo) ? g_theme.text : g_theme.gold);
     result = (LRESULT)hbrBack;
     return true;
 }
 
 void HeroesShutdown() {
     g_warlockEnabled = false;
+    g_warriorEnabled = false;
+    g_warriorInitPending = false;
     g_warlockTremorEnabled = false;
     g_tremorBindingKey = false;
     InterlockedExchange(&g_tremorBindState, TREMOR_BIND_IDLE);
+    g_warriorRotationBindingKey = false;
+    InterlockedExchange(&g_warriorRotationBindState, TREMOR_BIND_IDLE);
+    g_warriorRotationHotkeyWasDown = false;
     InterlockedExchange(&g_tremorManualActiveUntil, 0);
     ResetNativeTremorSlots(false);
-    QueueLua("AK_Enabled=false; TB_Enabled=false; TB_NativeAllowed=false");
+    g_warriorGearCaptureMode = 0;
+    QueueLua("WR_GearCaptureTarget=nil; WR_GearCaptureAfter=nil; if WR_GearCaptureFrame then WR_GearCaptureFrame:Hide() end");
+    QueueLua("AK_Enabled=false; TB_Enabled=false; TB_NativeAllowed=false; if WR_Engine then WR_Engine.Enabled=false end");
     HeroesSetVisible(false);
 }
